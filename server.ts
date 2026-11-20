@@ -18,7 +18,7 @@ async function callGeminiWithRetry(ai: GoogleGenAI, base64Data: string, detected
     for (let attempt = 1; attempt <= maxRetriesPerModel; attempt++) {
       try {
         const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('OCR request timed out after 15 seconds')), 15000)
+          setTimeout(() => reject(new Error('OCR request timed out after 20 seconds')), 20000)
         );
 
         const apiCall = ai.models.generateContent({
@@ -31,7 +31,7 @@ async function callGeminiWithRetry(ai: GoogleGenAI, base64Data: string, detected
               }
             },
             {
-              text: "Analyze this Malaysian receipt, invoice, or payment bill. Extract the merchant name, receipt date (YYYY-MM-DD), receipt/invoice number, a concise particulars description, total gross amount in RM, tax amount in RM, and suggest the appropriate Malaysian accounting GL account category."
+              text: "Analyze this Malaysian receipt, invoice, or tax bill. Extract merchantName, merchantRegNo (SSM), documentType, receiptNumber, transactionDate (DD/MM/YYYY), lineItems (description, quantity, unitPrice, amount, suggestedGlCode), subtotal, sstTaxAmount, rounding, totalAmount (RM), and analysisNotes (flagging any math mismatch or missing receipt number)."
             }
           ],
           config: {
@@ -80,13 +80,19 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-  // Ensure JSON and urlencoded parsers are registered before all routes
+  // Register body parsers before all routes with 25mb limit
   app.use(express.json({ limit: '25mb' }));
   app.use(express.urlencoded({ limit: '25mb', extended: true }));
 
-  // Initialize Gemini AI SDK
+  // Initialize Gemini AI SDK strictly on backend
   const apiKey = process.env.GEMINI_API_KEY;
   const ai = new GoogleGenAI({ apiKey: apiKey || '' });
+
+  // Gemini Connection Status Endpoint
+  app.get('/api/gemini/status', (req, res) => {
+    const connected = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.length > 5);
+    return res.json({ connected, model: 'gemini-3.8-flash' });
+  });
 
   // OCR API Endpoint for Receipts / Invoices
   app.post('/api/ocr', async (req, res) => {
@@ -114,18 +120,33 @@ async function startServer() {
       const receiptSchema: Schema = {
         type: Type.OBJECT,
         properties: {
-          merchant_name: { type: Type.STRING, description: "Name of the merchant or supplier" },
-          receipt_date: { type: Type.STRING, description: "Date on receipt in YYYY-MM-DD format" },
-          receipt_or_invoice_no: { type: Type.STRING, description: "Receipt or Invoice or Bill number" },
-          description_summary: { type: Type.STRING, description: "Concise line-item summary suitable for voucher Particulars (e.g. A4 Paper & Arch Files)" },
-          total_amount_rm: { type: Type.NUMBER, description: "Total gross amount in Malaysian Ringgit (RM)" },
-          tax_amount_rm: { type: Type.NUMBER, description: "Tax / SST amount in RM if applicable, else 0" },
-          suggested_account_category: { 
-            type: Type.STRING, 
-            description: "Suggested GL account category code and name from: 610-010 Printing & Stationery, 610-020 Travelling & Petrol, 610-030 Refreshments & Entertainment, 610-040 Courier & Postage, 610-050 Office Maintenance, 610-060 Filing & Stamping Fees, 610-070 Professional Subscriptions, 610-080 Utilities & Communications" 
-          }
+          merchantName: { type: Type.STRING, description: "Name of the merchant or supplier" },
+          merchantRegNo: { type: Type.STRING, description: "SSM or Company registration number if available" },
+          documentType: { type: Type.STRING, description: "Tax Invoice, Receipt, Cash Bill, or Voucher" },
+          receiptNumber: { type: Type.STRING, description: "Receipt or Invoice or Bill number" },
+          transactionDate: { type: Type.STRING, description: "Date on receipt in DD/MM/YYYY or YYYY-MM-DD format" },
+          lineItems: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                description: { type: Type.STRING, description: "Description of item" },
+                quantity: { type: Type.NUMBER, description: "Quantity" },
+                unitPrice: { type: Type.NUMBER, description: "Unit price in RM" },
+                amount: { type: Type.NUMBER, description: "Total line amount in RM" },
+                suggestedGlCode: { type: Type.STRING, description: "Suggested GL account code e.g. 610-010" }
+              },
+              required: ["description", "amount"]
+            },
+            description: "Itemized list of purchased goods or services"
+          },
+          subtotal: { type: Type.NUMBER, description: "Subtotal before tax in RM" },
+          sstTaxAmount: { type: Type.NUMBER, description: "SST / Service tax amount in RM" },
+          rounding: { type: Type.NUMBER, description: "Rounding adjustment in RM if any" },
+          totalAmount: { type: Type.NUMBER, description: "Total gross amount in Malaysian Ringgit (RM)" },
+          analysisNotes: { type: Type.STRING, description: "Assistive review notes flagging any math mismatch, missing receipt number, or tax details" }
         },
-        required: ["merchant_name", "receipt_date", "receipt_or_invoice_no", "description_summary", "total_amount_rm", "suggested_account_category"]
+        required: ["merchantName", "transactionDate", "totalAmount", "lineItems"]
       };
 
       const textResult = await callGeminiWithRetry(ai, base64Data, detectedMime, receiptSchema);

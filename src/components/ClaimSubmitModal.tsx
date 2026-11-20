@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { UserProfile, ClaimVoucher, ExpenseItem } from '../types';
 import { COMPANIES, GL_ACCOUNTS } from '../data/mockData';
-import { Upload, Sparkles, X, Plus, Trash2, Check, AlertCircle, Loader2, RotateCw } from 'lucide-react';
+import { Upload, Sparkles, X, Plus, Trash2, Check, AlertCircle, Loader2, RotateCw, CheckCircle2 } from 'lucide-react';
 
 interface ClaimSubmitModalProps {
   currentUser: UserProfile;
@@ -22,10 +22,22 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
   const [chequeNo, setChequeNo] = useState<string>('');
   
   const [items, setItems] = useState<ExpenseItem[]>([]);
+  const [analysisNotes, setAnalysisNotes] = useState<string | null>(null);
+
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
-  const [ocrStatusText, setOcrStatusText] = useState<string>('Step 1/3: Reading receipt file...');
+  const [ocrStatusText, setOcrStatusText] = useState<string>('Step 1/3: Reading document...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [lastUploadedFile, setLastUploadedFile] = useState<{ base64: string; mimeType: string } | null>(null);
+
+  // Gemini Connection Status State
+  const [geminiStatus, setGeminiStatus] = useState<{ connected: boolean; model: string } | null>(null);
+
+  useEffect(() => {
+    fetch('/api/gemini/status')
+      .then(res => res.json())
+      .then(data => setGeminiStatus(data))
+      .catch(() => setGeminiStatus({ connected: false, model: 'gemini-3.8-flash' }));
+  }, []);
 
   // Robust FileReader helper with both onload and onerror attached
   const fileToBase64 = (file: File): Promise<string> => {
@@ -43,7 +55,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     });
   };
 
-  // Optional image resizing helper for large images (skips PDF)
+  // Image compression helper for image/* files (skips PDF)
   const compressImageIfNeeded = (dataUrl: string): Promise<string> => {
     return new Promise((resolve) => {
       const img = new Image();
@@ -66,15 +78,12 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
-          resolve(canvas.toDataURL('image/jpeg', 0.85));
+          resolve(canvas.toDataURL('image/jpeg', 0.75));
         } else {
           resolve(dataUrl);
         }
       };
-      img.onerror = () => {
-        // If image loading fails, resolve original dataUrl to avoid hanging
-        resolve(dataUrl);
-      };
+      img.onerror = () => resolve(dataUrl);
       img.src = dataUrl;
     });
   };
@@ -88,7 +97,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
       const file = files[i];
       const mimeType = file.type || 'image/jpeg';
       
-      setOcrStatusText('Step 1/3: Reading receipt file...');
+      setOcrStatusText('Step 1/3: Reading document...');
       setIsAnalyzing(true);
       setErrorMsg(null);
 
@@ -103,11 +112,10 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
         await processImageWithOCR(base64Data, mimeType);
       } catch (err: any) {
         console.error('File Read Error:', err);
-        setErrorMsg('Failed to read receipt file. Please try another image or PDF.');
+        setErrorMsg('Failed to read document file. Please try another image or PDF.');
         setIsAnalyzing(false);
       }
     }
-    // reset file input
     e.target.value = '';
   };
 
@@ -122,13 +130,13 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
       while (attempt <= maxAttempts) {
         try {
           if (attempt === 1) {
-            setOcrStatusText('Step 2/3: Uploading to Gemini 3.8 Flash OCR...');
+            setOcrStatusText('Step 2/3: Analyzing with Google Gemini 3.8 Flash...');
           } else {
             setOcrStatusText(`AI server is busy—retrying automatically (Attempt ${attempt}/3)...`);
           }
 
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 20000); // Strict 20s timeout
+          const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
 
           const res = await fetch('/api/ocr', {
             method: 'POST',
@@ -144,38 +152,88 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
             throw new Error(json.error || 'Gemini OCR extraction failed');
           }
 
-          setOcrStatusText('Step 3/3: Extracting line items...');
+          setOcrStatusText('Step 3/3: Populating particulars & GL codes...');
           const extracted = json.data;
-          const defaultGL = GL_ACCOUNTS[0];
 
-          // Find matching GL account if possible
-          const matchedGL = GL_ACCOUNTS.find(g => 
-            extracted.suggested_account_category?.toLowerCase().includes(g.name.toLowerCase()) ||
-            extracted.suggested_account_category?.toLowerCase().includes(g.code.toLowerCase())
-          ) || defaultGL;
+          if (extracted.analysisNotes) {
+            setAnalysisNotes(extracted.analysisNotes);
+          }
 
-          const newItem: ExpenseItem = {
-            lineNo: items.length + 1,
-            date: extracted.receipt_date || voucherDate,
-            merchant: extracted.merchant_name || 'Unknown Merchant',
-            receiptNo: extracted.receipt_or_invoice_no || `RCP-${Math.floor(1000 + Math.random() * 9000)}`,
-            particulars: extracted.description_summary || 'General Office Expense',
-            accountCode: matchedGL.code,
-            accountName: matchedGL.name,
-            taxCode: extracted.tax_amount_rm > 0 ? 'SV' : 'NR',
-            taxAmountRM: extracted.tax_amount_rm || 0,
-            netAmountRM: (extracted.total_amount_rm || 0) - (extracted.tax_amount_rm || 0),
-            amountRM: extracted.total_amount_rm || 0,
-            receiptImageUrl: mimeType === 'application/pdf' ? 'https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?auto=format&fit=crop&w=800&q=80' : base64Data
-          };
+          // Parse transaction date to YYYY-MM-DD if in DD/MM/YYYY
+          let parsedDate = voucherDate;
+          if (extracted.transactionDate) {
+            const parts = extracted.transactionDate.split(/[/.-]/);
+            if (parts.length === 3) {
+              if (parts[2].length === 4) {
+                // DD/MM/YYYY
+                parsedDate = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+              } else if (parts[0].length === 4) {
+                // YYYY-MM-DD
+                parsedDate = extracted.transactionDate;
+              }
+            }
+          }
+          if (parsedDate) {
+            setVoucherDate(parsedDate);
+          }
 
-          setItems(prev => [...prev, newItem]);
+          // Convert line items
+          const newItems: ExpenseItem[] = (extracted.lineItems || []).map((li: any, idx: number) => {
+            const defaultGL = GL_ACCOUNTS[0];
+            const matchedGL = GL_ACCOUNTS.find(g => 
+              li.suggestedGlCode?.toLowerCase().includes(g.code.toLowerCase()) ||
+              li.description?.toLowerCase().includes(g.name.toLowerCase())
+            ) || defaultGL;
+
+            const lineAmount = li.amount || (li.quantity && li.unitPrice ? li.quantity * li.unitPrice : 0);
+
+            // Compress image thumbnail if image under 200KB to prevent Firestore 1 MiB limit issues
+            let thumbnail = mimeType === 'application/pdf' ? 'https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?auto=format&fit=crop&w=800&q=80' : base64Data;
+            if (thumbnail.length > 200000) {
+              thumbnail = 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=800&q=80';
+            }
+
+            return {
+              lineNo: items.length + idx + 1,
+              date: parsedDate,
+              merchant: extracted.merchantName || 'Unknown Merchant',
+              receiptNo: extracted.receiptNumber || `RCP-${Math.floor(1000 + Math.random() * 9000)}`,
+              particulars: li.description || 'General Business Expense',
+              accountCode: matchedGL.code,
+              accountName: matchedGL.name,
+              taxCode: extracted.sstTaxAmount > 0 ? 'SV' : 'NR',
+              taxAmountRM: extracted.sstTaxAmount ? extracted.sstTaxAmount / (extracted.lineItems.length || 1) : 0,
+              netAmountRM: lineAmount,
+              amountRM: lineAmount,
+              receiptImageUrl: thumbnail
+            };
+          });
+
+          if (newItems.length === 0) {
+            const defaultGL = GL_ACCOUNTS[0];
+            newItems.push({
+              lineNo: items.length + 1,
+              date: parsedDate,
+              merchant: extracted.merchantName || 'Unknown Merchant',
+              receiptNo: extracted.receiptNumber || `RCP-${Math.floor(1000 + Math.random() * 9000)}`,
+              particulars: extracted.documentType ? `${extracted.documentType} - General Expense` : 'General Business Expense',
+              accountCode: defaultGL.code,
+              accountName: defaultGL.name,
+              taxCode: 'NR',
+              taxAmountRM: extracted.sstTaxAmount || 0,
+              netAmountRM: extracted.totalAmount || 0,
+              amountRM: extracted.totalAmount || 100.00,
+              receiptImageUrl: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=800&q=80'
+            });
+          }
+
+          setItems(prev => [...prev, ...newItems]);
           setErrorMsg(null);
           return;
         } catch (err: any) {
           console.warn(`OCR attempt ${attempt} failed:`, err);
           if (err.name === 'AbortError') {
-            throw new Error('OCR request timed out after 20 seconds.');
+            throw new Error('OCR request timed out after 25 seconds.');
           }
           if (attempt < maxAttempts) {
             attempt++;
@@ -222,7 +280,6 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     const updated = [...items];
     updated[index] = { ...updated[index], [field]: value };
     
-    // If amount changes, update net amount
     if (field === 'amountRM') {
       const amt = parseFloat(value) || 0;
       const tax = updated[index].taxAmountRM || 0;
@@ -277,9 +334,26 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
         
         {/* Modal Header */}
         <div className="px-6 py-4 bg-slate-900 text-white flex justify-between items-center">
-          <div className="flex items-center space-x-2">
-            <Sparkles className="w-5 h-5 text-emerald-400" />
-            <h2 className="text-lg font-bold">New Staff Expense Claim & AI Receipt OCR</h2>
+          <div className="flex items-center space-x-3">
+            <div className="bg-emerald-600 p-2 rounded-lg text-white">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold">New Staff Expense Claim & AI Receipt OCR</h2>
+              <div className="flex items-center space-x-2 mt-0.5">
+                {geminiStatus?.connected ? (
+                  <span className="inline-flex items-center text-[10px] font-medium text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-800">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 animate-pulse"></span>
+                    Google Gemini Connected ({geminiStatus.model})
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center text-[10px] font-medium text-amber-400 bg-amber-950/80 px-2 py-0.5 rounded border border-amber-800">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 mr-1.5"></span>
+                    Gemini API Key Missing (Using Manual Fallback)
+                  </span>
+                )}
+              </div>
+            </div>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white p-1 rounded-lg">
             <X className="w-5 h-5" />
@@ -306,6 +380,16 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
                   <span>Retry Scan</span>
                 </button>
               )}
+            </div>
+          )}
+
+          {analysisNotes && (
+            <div className="p-3 bg-blue-50 border border-blue-200 text-blue-900 rounded-xl text-xs flex items-start space-x-2">
+              <CheckCircle2 className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold block">Assistive Review Tip (Gemini OCR):</span>
+                <span>{analysisNotes}</span>
+              </div>
             </div>
           )}
 
@@ -530,14 +614,14 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
 
                     {item.receiptImageUrl && (
                       <div className="flex items-center space-x-2 pt-2">
-                        <span className="text-[10px] text-slate-500">Attached Receipt:</span>
+                        <span className="text-[10px] text-slate-500">Attached Receipt Thumbnail:</span>
                         <a 
                           href={item.receiptImageUrl} 
                           target="_blank" 
                           rel="noreferrer"
                           className="text-[10px] text-emerald-600 hover:underline font-medium"
                         >
-                          View Image Thumbnail
+                          View Image Preview
                         </a>
                       </div>
                     )}
