@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { UserProfile } from '../types';
 import { COMPANIES } from '../data/mockData';
 import { db } from '../firebase';
-import { collection, getDocs, doc, updateDoc, setDoc, getDoc } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
 import { Shield, Users, Check, X, Building2, UserCheck, Key, Save, Sparkles, AlertCircle } from 'lucide-react';
 
 const SYSTEM_SETTINGS_COLLECTION = 'system_settings';
@@ -26,10 +26,83 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const [strictRealDateOnlyPolicy, setStrictRealDateOnlyPolicy] = useState<boolean>(true);
+  const [selectedEntityToClear, setSelectedEntityToClear] = useState<string>(COMPANIES[0].id);
+  const [confirmDeleteText, setConfirmDeleteText] = useState<string>('');
+  const [isPurgingMock, setIsPurgingMock] = useState<boolean>(false);
+  const [isClearingEntityClaims, setIsClearingEntityClaims] = useState<boolean>(false);
+
   useEffect(() => {
     fetchUsers();
     fetchSharedApiKey();
+    getDoc(doc(db, SYSTEM_SETTINGS_COLLECTION, 'security_policy')).then(snap => {
+      if (snap.exists() && typeof snap.data().strictRealDateOnly === 'boolean') {
+        setStrictRealDateOnlyPolicy(snap.data().strictRealDateOnly);
+      }
+    }).catch(err => console.warn(err));
   }, []);
+
+  const handleToggleStrictPolicy = async (newVal: boolean) => {
+    setStrictRealDateOnlyPolicy(newVal);
+    try {
+      await setDoc(doc(db, SYSTEM_SETTINGS_COLLECTION, 'security_policy'), {
+        strictRealDateOnly: newVal,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+      setToastMsg(`Strict Real-Date Policy set to ${newVal ? 'ON' : 'OFF'}`);
+      setTimeout(() => setToastMsg(null), 3000);
+    } catch (err: any) {
+      setErrorMsg(`Failed to save policy: ${err.message}`);
+    }
+  };
+
+  const handlePurgeMockData = async () => {
+    if (!window.confirm('Are you sure you want to purge all sample / mock data claims from Firestore?')) return;
+    setIsPurgingMock(true);
+    try {
+      const claimsSnap = await getDocs(collection(db, 'claims'));
+      let count = 0;
+      for (const dSnap of claimsSnap.docs) {
+        const data = dSnap.data();
+        if (data.id?.startsWith('CLM-2024') || data.id?.startsWith('CLM-2025') || data.voucherNo?.includes('2024') || data.voucherNo?.includes('2025')) {
+          await deleteDoc(doc(db, 'claims', dSnap.id));
+          count++;
+        }
+      }
+      setToastMsg(`Successfully purged ${count} sample/mock claims.`);
+      setTimeout(() => setToastMsg(null), 4000);
+    } catch (err: any) {
+      setErrorMsg(`Purge failed: ${err.message}`);
+    } finally {
+      setIsPurgingMock(false);
+    }
+  };
+
+  const handleClearCompanyClaims = async () => {
+    if (confirmDeleteText !== 'CONFIRM') {
+      setErrorMsg('Please type CONFIRM exactly to authorize clearing company claims.');
+      return;
+    }
+    setIsClearingEntityClaims(true);
+    try {
+      const claimsSnap = await getDocs(collection(db, 'claims'));
+      let count = 0;
+      for (const dSnap of claimsSnap.docs) {
+        const data = dSnap.data();
+        if (data.companyId === selectedEntityToClear || data.companyEntityId === selectedEntityToClear) {
+          await deleteDoc(doc(db, 'claims', dSnap.id));
+          count++;
+        }
+      }
+      setConfirmDeleteText('');
+      setToastMsg(`Successfully cleared ${count} claims for company entity.`);
+      setTimeout(() => setToastMsg(null), 4000);
+    } catch (err: any) {
+      setErrorMsg(`Clear claims failed: ${err.message}`);
+    } finally {
+      setIsClearingEntityClaims(false);
+    }
+  };
 
   const fetchUsers = async () => {
     setIsLoading(true);
@@ -300,6 +373,87 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                 })}
               </div>
             )}
+          </div>
+
+          {/* Admin Danger Zone Panel */}
+          <div className="bg-rose-50/70 border-2 border-rose-300 rounded-xl p-5 space-y-5">
+            <div className="flex items-center space-x-2 text-rose-900 font-bold text-sm">
+              <AlertCircle className="w-5 h-5 text-rose-600" />
+              <span>Admin Danger Zone Controls (Restricted)</span>
+            </div>
+
+            {/* 1. Strict Real-Date Policy Toggle */}
+            <div className="bg-white p-4 rounded-xl border border-rose-200 flex items-center justify-between">
+              <div>
+                <span className="font-bold text-slate-900 text-xs block">Enforce Strict Real-Date Policy</span>
+                <span className="text-[11px] text-slate-600">When active, blocks claim submissions with future, expired (&gt;90d), or unauthentic/placeholder dates.</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleToggleStrictPolicy(!strictRealDateOnlyPolicy)}
+                className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                  strictRealDateOnlyPolicy ? 'bg-rose-600' : 'bg-slate-400'
+                }`}
+              >
+                <span className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                  strictRealDateOnlyPolicy ? 'translate-x-5' : 'translate-x-0'
+                }`} />
+              </button>
+            </div>
+
+            {/* 2. Purge Sample / Mock Data */}
+            <div className="bg-white p-4 rounded-xl border border-rose-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div>
+                <span className="font-bold text-slate-900 text-xs block">Purge Sample / Mock Claims</span>
+                <span className="text-[11px] text-slate-600">Permanently remove seeded sample 2024/2025 demo vouchers from Firestore.</span>
+              </div>
+              <button
+                type="button"
+                onClick={handlePurgeMockData}
+                disabled={isPurgingMock}
+                className="px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold shadow-2xs transition disabled:opacity-50 shrink-0"
+              >
+                {isPurgingMock ? 'Purging...' : 'Purge Sample Data'}
+              </button>
+            </div>
+
+            {/* 3. Clear Claims by Company Entity */}
+            <div className="bg-white p-4 rounded-xl border border-rose-200 space-y-3">
+              <div>
+                <span className="font-bold text-slate-900 text-xs block">Clear Claims by Company Entity</span>
+                <span className="text-[11px] text-slate-600">Delete all claims for a selected corporate entity. Strictly preserves user accounts and shared API keys.</span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <select
+                  value={selectedEntityToClear}
+                  onChange={(e) => setSelectedEntityToClear(e.target.value)}
+                  className="text-xs bg-slate-50 border border-slate-300 rounded-lg p-2"
+                >
+                  {COMPANIES.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+
+                <div className="flex space-x-2">
+                  <input
+                    type="text"
+                    placeholder="Type CONFIRM"
+                    value={confirmDeleteText}
+                    onChange={(e) => setConfirmDeleteText(e.target.value)}
+                    className="flex-1 text-xs bg-slate-50 border border-slate-300 rounded-lg p-2 font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleClearCompanyClaims}
+                    disabled={isClearingEntityClaims || confirmDeleteText !== 'CONFIRM'}
+                    className="px-4 py-2 bg-rose-700 hover:bg-rose-600 text-white rounded-lg text-xs font-semibold shadow-2xs transition disabled:opacity-50 shrink-0"
+                  >
+                    {isClearingEntityClaims ? 'Clearing...' : 'Clear Claims'}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 

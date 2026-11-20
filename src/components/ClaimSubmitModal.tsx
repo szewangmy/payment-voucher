@@ -51,6 +51,16 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
   // Gemini Connection Status State
   const [geminiStatus, setGeminiStatus] = useState<{ connected: boolean; model: string; keySource?: string } | null>(null);
   const [activeApiKey, setActiveApiKey] = useState<string | null>(null);
+  const [strictRealDateOnly, setStrictRealDateOnly] = useState<boolean>(true);
+
+  useEffect(() => {
+    const unsubPolicy = onSnapshot(doc(db, SYSTEM_SETTINGS_COLLECTION, 'security_policy'), (snap) => {
+      if (snap.exists() && typeof snap.data().strictRealDateOnly === 'boolean') {
+        setStrictRealDateOnly(snap.data().strictRealDateOnly);
+      }
+    });
+    return () => unsubPolicy();
+  }, []);
 
   useEffect(() => {
     const checkServerStatus = async () => {
@@ -372,7 +382,9 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
             taxAmountRM: extractedData.sstTaxAmount ? extractedData.sstTaxAmount / (extractedData.lineItems.length || 1) : 0,
             netAmountRM: lineAmount,
             amountRM: lineAmount,
-            receiptImageUrl: thumbnail
+            receiptImageUrl: thumbnail,
+            isDateAuthentic: extractedData.isDateAuthentic,
+            dateAuditFlag: extractedData.dateAuditFlag
           };
         });
 
@@ -451,12 +463,45 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     setItems(updated);
   };
 
+  const checkDateViolation = (dateStr: string, isAuthentic?: boolean, auditFlag?: string): string | null => {
+    if (!dateStr) return 'Transaction date is missing.';
+    if (isAuthentic === false) return auditFlag || 'AI Audit Flag: Document date flagged as unauthentic, altered, or placeholder.';
+    if (auditFlag && auditFlag.trim().length > 0) return auditFlag;
+
+    const todayStr = '2026-11-19';
+    if (dateStr > todayStr) return `Future Date Violation: Date (${dateStr}) is after today's real date (${todayStr}).`;
+
+    const yr = parseInt(dateStr.substring(0, 4), 10);
+    if (isNaN(yr) || yr < 2024 || dateStr.startsWith('1970')) {
+      return `Invalid / Fake Placeholder Date: (${dateStr}) is before year 2024 or epoch placeholder.`;
+    }
+
+    const d = new Date(dateStr);
+    const today = new Date('2026-11-19');
+    const diffDays = (today.getTime() - d.getTime()) / (1000 * 3600 * 24);
+    if (diffDays > 90) {
+      return `Expired Receipt Warning: Receipt date (${dateStr}) is more than 90 days old (${Math.round(diffDays)} days ago).`;
+    }
+
+    return null;
+  };
+
+  const voucherDateViolation = checkDateViolation(voucherDate);
+  const itemViolations = items.map(item => checkDateViolation(item.date, item.isDateAuthentic, item.dateAuditFlag));
+  const hasDangerZoneViolation = Boolean(voucherDateViolation || itemViolations.some(v => v !== null));
+  const firstViolationText = voucherDateViolation || itemViolations.find(v => v !== null) || null;
+
   const totalAmount = items.reduce((sum, item) => sum + (parseFloat(String(item.amountRM)) || 0), 0);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (items.length === 0) {
       setErrorMsg('Please add at least one receipt item.');
+      return;
+    }
+
+    if (strictRealDateOnly && hasDangerZoneViolation) {
+      setErrorMsg('Cannot submit claim: Danger Zone date or audit integrity violation detected.');
       return;
     }
 
@@ -539,6 +584,19 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
         {/* Modal Body */}
         <form onSubmit={handleSubmit} className="p-6 overflow-y-auto space-y-6 flex-1">
           
+          {strictRealDateOnly && hasDangerZoneViolation && (
+            <div className="p-4 bg-rose-50 border-2 border-rose-300 text-rose-900 rounded-xl space-y-1">
+              <div className="flex items-center space-x-2 font-bold text-rose-800">
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
+                <span>DANGER ZONE — Date & Audit Integrity Alert</span>
+              </div>
+              <p className="text-xs text-rose-700">{firstViolationText}</p>
+              <p className="text-[11px] font-semibold text-rose-900">
+                Strict Real-Date Enforcement is ACTIVE. Submission is blocked until date/audit violations are resolved.
+              </p>
+            </div>
+          )}
+
           {errorMsg && (
             <div className="p-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-sm flex items-center space-x-2">
               <AlertCircle className="w-5 h-5 shrink-0 text-amber-600" />
@@ -851,7 +909,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={items.length === 0}
+              disabled={items.length === 0 || (strictRealDateOnly && hasDangerZoneViolation)}
               className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium shadow-sm disabled:opacity-50"
             >
               Submit Claim for Approval

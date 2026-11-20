@@ -38,6 +38,8 @@ export interface ExpenseItem {
   netAmountRM: number;
   amountRM: number;
   receiptImageUrl?: string;
+  dateAuditFlag?: string;
+  isDateAuthentic?: boolean;
 }
 
 export type ClaimStatus = 'pending' | 'approved' | 'paid' | 'rejected';

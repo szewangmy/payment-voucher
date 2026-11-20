@@ -3,7 +3,7 @@ import { ClaimVoucher, UserProfile, ClaimStatus } from '../types';
 import { COMPANIES, GL_ACCOUNTS } from '../data/mockData';
 import { 
   X, Printer, CheckCircle, XCircle, DollarSign, Clock, 
-  Building2, Receipt, ShieldCheck, FileText, ExternalLink 
+  Building2, Receipt, ShieldCheck, FileText, ExternalLink, AlertCircle 
 } from 'lucide-react';
 
 interface VoucherDetailModalProps {
@@ -32,6 +32,29 @@ export const VoucherDetailModal: React.FC<VoucherDetailModalProps> = ({
   );
 
   const isAdmin = currentUser.role === 'admin';
+
+  const checkVoucherDangerZone = () => {
+    const todayStr = '2026-11-19';
+    if (claim.voucherDate > todayStr) return `Future voucher date (${claim.voucherDate})`;
+    for (const item of claim.items) {
+      if (item.isDateAuthentic === false || (item.dateAuditFlag && item.dateAuditFlag.length > 0)) {
+        return item.dateAuditFlag || 'Unauthentic receipt date flagged';
+      }
+      if (item.date > todayStr) return `Future item date (${item.date})`;
+      const yr = parseInt(item.date.substring(0, 4), 10);
+      if (isNaN(yr) || yr < 2024 || item.date.startsWith('1970')) {
+        return `Invalid / fake placeholder date (${item.date})`;
+      }
+      const d = new Date(item.date);
+      const today = new Date('2026-11-19');
+      const diffDays = (today.getTime() - d.getTime()) / (1000 * 3600 * 24);
+      if (diffDays > 90) {
+        return `Expired receipt date (${item.date} is >90 days old)`;
+      }
+    }
+    return null;
+  };
+  const dangerZoneReason = checkVoucherDangerZone();
 
   const handleSaveAndApprove = (newStatus: ClaimStatus) => {
     const updated: ClaimVoucher = {
@@ -91,6 +114,16 @@ export const VoucherDetailModal: React.FC<VoucherDetailModalProps> = ({
           {/* Left / Main Details (2 cols) */}
           <div className="lg:col-span-2 space-y-6">
             
+            {dangerZoneReason && (
+              <div className="bg-rose-50 border-2 border-rose-300 text-rose-900 p-4 rounded-xl text-xs flex items-center space-x-3">
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
+                <div>
+                  <span className="font-bold block uppercase tracking-wider text-rose-800">DANGER ZONE FLAG</span>
+                  <span>{dangerZoneReason}</span>
+                </div>
+              </div>
+            )}
+
             {/* Voucher Metadata */}
             <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
               <div>

@@ -35,7 +35,7 @@ async function callGeminiWithTurboRetry(apiKey: string, base64Data: string, dete
               }
             },
             {
-              text: "Analyze Malaysian receipt. Return strict JSON: merchantName, merchantRegNo, documentType, receiptNumber, transactionDate (DD/MM/YYYY), lineItems (description, quantity, unitPrice, amount, suggestedGlCode), subtotal, sstTaxAmount, rounding, totalAmount, analysisNotes."
+              text: "Analyze Malaysian receipt. Return strict JSON: merchantName, merchantRegNo, documentType, receiptNumber, transactionDate (DD/MM/YYYY), lineItems (description, quantity, unitPrice, amount, suggestedGlCode), subtotal, sstTaxAmount, rounding, totalAmount, analysisNotes, isDateAuthentic (boolean: true if valid real merchant transaction date, false if missing, unreadable, altered/handwritten placeholder, or future date), dateAuditFlag (string: description of date issue if any, or empty string)."
             }
           ],
           config: {
@@ -140,7 +140,9 @@ async function startServer() {
           sstTaxAmount: { type: Type.NUMBER },
           rounding: { type: Type.NUMBER },
           totalAmount: { type: Type.NUMBER },
-          analysisNotes: { type: Type.STRING }
+          analysisNotes: { type: Type.STRING },
+          isDateAuthentic: { type: Type.BOOLEAN },
+          dateAuditFlag: { type: Type.STRING }
         },
         required: ["merchantName", "transactionDate", "totalAmount", "lineItems"]
       };
