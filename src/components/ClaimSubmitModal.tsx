@@ -4,7 +4,11 @@ import { COMPANIES, GL_ACCOUNTS } from '../data/mockData';
 import { db } from '../firebase';
 import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { GoogleGenAI, Schema, Type } from '@google/genai';
-import { Upload, Sparkles, X, Plus, Trash2, Check, AlertCircle, Loader2, RotateCw, CheckCircle2 } from 'lucide-react';
+import * as pdfjsLib from 'pdfjs-dist';
+import { Upload, Sparkles, X, Plus, Trash2, Check, AlertCircle, Loader2, RotateCw, CheckCircle2, Zap } from 'lucide-react';
+
+// Configure pdfjs worker from CDN
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
 const SYSTEM_SETTINGS_COLLECTION = 'system_settings';
 const GEMINI_CONFIG_DOC = 'gemini_config';
@@ -13,6 +17,15 @@ interface ClaimSubmitModalProps {
   currentUser: UserProfile;
   onClose: () => void;
   onAddClaim: (newClaim: ClaimVoucher) => void;
+}
+
+interface UploadQueueItem {
+  id: string;
+  fileName: string;
+  status: 'scanning' | 'done' | 'error';
+  errorText?: string;
+  base64Data: string;
+  mimeType: string;
 }
 
 export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
@@ -30,17 +43,16 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
   const [items, setItems] = useState<ExpenseItem[]>([]);
   const [analysisNotes, setAnalysisNotes] = useState<string | null>(null);
 
-  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
-  const [ocrStatusText, setOcrStatusText] = useState<string>('Step 1/3: Reading document...');
+  const [turboMode, setTurboMode] = useState<boolean>(true);
+  const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([]);
+  const [isAnyScanning, setIsAnyScanning] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [lastUploadedFile, setLastUploadedFile] = useState<{ base64: string; mimeType: string } | null>(null);
 
   // Gemini Connection Status State
   const [geminiStatus, setGeminiStatus] = useState<{ connected: boolean; model: string; keySource?: string } | null>(null);
   const [activeApiKey, setActiveApiKey] = useState<string | null>(null);
 
   useEffect(() => {
-    // 1. Check server status endpoint
     const checkServerStatus = async () => {
       try {
         const res = await fetch('/api/gemini/status');
@@ -56,16 +68,15 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
       return false;
     };
 
-    // 2. Real-time subscription to Firestore shared gemini config
     const unsubscribe = onSnapshot(doc(db, SYSTEM_SETTINGS_COLLECTION, GEMINI_CONFIG_DOC), async (docSnap) => {
       if (docSnap.exists() && docSnap.data().apiKey) {
         const key = docSnap.data().apiKey;
-        setGeminiStatus({ connected: true, model: 'gemini-3.8-flash', keySource: 'Shared Company Key' });
+        setGeminiStatus({ connected: true, model: turboMode ? 'gemini-3.5-flash-lite (Turbo)' : 'gemini-3.8-flash (Deep)', keySource: 'Shared Company Key' });
         setActiveApiKey(key);
       } else {
         const hasServerKey = await checkServerStatus();
         if (!hasServerKey) {
-          setGeminiStatus({ connected: false, model: 'gemini-3.8-flash' });
+          setGeminiStatus({ connected: false, model: 'gemini-3.5-flash-lite' });
           setActiveApiKey(null);
         }
       }
@@ -75,33 +86,55 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [turboMode]);
 
-  // Robust FileReader helper with both onload and onerror attached
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          resolve(reader.result);
+  // Client-side PDF pre-processor onto canvas (max 1024px width, JPEG 70%)
+  const renderPdfToJpegBase64s = async (file: File): Promise<string[]> => {
+    const arrayBuffer = await file.arrayBuffer();
+    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+    const pdfDoc = await loadingTask.promise;
+    const jpegBase64s: string[] = [];
+
+    for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+      const page = await pdfDoc.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 1.5 });
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+
+      let width = viewport.width;
+      let height = viewport.height;
+      const maxDim = 1024;
+      if (width > maxDim || height > maxDim) {
+        if (width > height) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
         } else {
-          reject(new Error('Failed to convert file to base64 string'));
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
         }
-      };
-      reader.onerror = (error) => reject(error || new Error('FileReader error'));
-      reader.readAsDataURL(file);
-    });
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+
+      if (context) {
+        const scaledViewport = page.getViewport({ scale: width / viewport.width });
+        await page.render({ canvasContext: context, viewport: scaledViewport }).promise;
+        jpegBase64s.push(canvas.toDataURL('image/jpeg', 0.70));
+      }
+    }
+    return jpegBase64s;
   };
 
-  // Image compression helper for image/* files (skips PDF)
-  const compressImageIfNeeded = (dataUrl: string): Promise<string> => {
+  // Image compressor for image/* files (max 1024px width, 70% quality)
+  const compressImage = (dataUrl: string): Promise<string> => {
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
         let width = img.width;
         let height = img.height;
-        const maxDim = 1200;
+        const maxDim = 1024;
         if (width > maxDim || height > maxDim) {
           if (width > height) {
             height = Math.round((height * maxDim) / width);
@@ -116,7 +149,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
-          resolve(canvas.toDataURL('image/jpeg', 0.75));
+          resolve(canvas.toDataURL('image/jpeg', 0.70));
         } else {
           resolve(dataUrl);
         }
@@ -126,255 +159,260 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     });
   };
 
-  // Handle Receipt Upload & AI OCR via backend proxy or direct SDK fallback
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === 'string') resolve(reader.result);
+        else reject(new Error('Failed to read file'));
+      };
+      reader.onerror = (error) => reject(error || new Error('FileReader error'));
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // Non-blocking multi-receipt parallel processing (`Promise.allSettled`)
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
+    const newQueueItems: UploadQueueItem[] = [];
+
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
+      const itemId = `file-${Date.now()}-${i}`;
       const mimeType = file.type || 'image/jpeg';
-      
-      setOcrStatusText('Step 1/3: Reading document...');
-      setIsAnalyzing(true);
-      setErrorMsg(null);
 
-      try {
-        let base64Data = await fileToBase64(file);
-
-        if (mimeType.startsWith('image/')) {
-          base64Data = await compressImageIfNeeded(base64Data);
+      if (mimeType === 'application/pdf') {
+        try {
+          const pdfJpegs = await renderPdfToJpegBase64s(file);
+          pdfJpegs.forEach((jpegData, pIdx) => {
+            newQueueItems.push({
+              id: `${itemId}-p${pIdx}`,
+              fileName: `${file.name} (Page ${pIdx + 1})`,
+              status: 'scanning',
+              base64Data: jpegData,
+              mimeType: 'image/jpeg'
+            });
+          });
+        } catch (pdfErr) {
+          console.warn('PDF canvas render failed, falling back to raw PDF base64:', pdfErr);
+          const rawBase64 = await fileToBase64(file);
+          newQueueItems.push({
+            id: itemId,
+            fileName: file.name,
+            status: 'scanning',
+            base64Data: rawBase64,
+            mimeType: 'application/pdf'
+          });
         }
-
-        setLastUploadedFile({ base64: base64Data, mimeType });
-        await processImageWithOCR(base64Data, mimeType);
-      } catch (err: any) {
-        console.error('File Read Error:', err);
-        setErrorMsg('Failed to read document file. Please try another image or PDF.');
-        setIsAnalyzing(false);
+      } else if (mimeType.startsWith('image/')) {
+        const rawBase64 = await fileToBase64(file);
+        const compressedBase64 = await compressImage(rawBase64);
+        newQueueItems.push({
+          id: itemId,
+          fileName: file.name,
+          status: 'scanning',
+          base64Data: compressedBase64,
+          mimeType: 'image/jpeg'
+        });
       }
     }
+
+    setUploadQueue(prev => [...prev, ...newQueueItems]);
+    setIsAnyScanning(true);
+    setErrorMsg(null);
+
+    // Process concurrently with Promise.allSettled
+    const scanPromises = newQueueItems.map(item => processQueueItem(item));
+    await Promise.allSettled(scanPromises);
+    setIsAnyScanning(false);
     e.target.value = '';
   };
 
-  const processImageWithOCR = async (base64Data: string, mimeType: string) => {
-    setIsAnalyzing(true);
-    setErrorMsg(null);
-
+  const processQueueItem = async (item: UploadQueueItem) => {
     let attempt = 1;
-    const maxAttempts = 3;
+    const maxAttempts = 2;
 
-    try {
-      while (attempt <= maxAttempts) {
-        try {
-          if (attempt === 1) {
-            setOcrStatusText('Step 2/3: Analyzing with Google Gemini 3.8 Flash...');
-          } else {
-            setOcrStatusText(`AI server is busy—retrying automatically (Attempt ${attempt}/3)...`);
-          }
-
-          let extractedData: any = null;
-
-          // Clean base64
-          let cleanBase64 = base64Data;
-          let cleanMime = mimeType;
-          if (base64Data.startsWith('data:')) {
-            const matches = base64Data.match(/^data:([^;]+);base64,(.+)$/);
-            if (matches) {
-              cleanMime = matches[1];
-              cleanBase64 = matches[2];
-            }
-          }
-
-          const receiptSchema: Schema = {
-            type: Type.OBJECT,
-            properties: {
-              merchantName: { type: Type.STRING, description: "Name of the merchant or supplier" },
-              merchantRegNo: { type: Type.STRING, description: "SSM or Company registration number if available" },
-              documentType: { type: Type.STRING, description: "Tax Invoice, Receipt, Cash Bill, or Voucher" },
-              receiptNumber: { type: Type.STRING, description: "Receipt or Invoice or Bill number" },
-              transactionDate: { type: Type.STRING, description: "Date on receipt in DD/MM/YYYY or YYYY-MM-DD format" },
-              lineItems: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    description: { type: Type.STRING, description: "Description of item" },
-                    quantity: { type: Type.NUMBER, description: "Quantity" },
-                    unitPrice: { type: Type.NUMBER, description: "Unit price in RM" },
-                    amount: { type: Type.NUMBER, description: "Total line amount in RM" },
-                    suggestedGlCode: { type: Type.STRING, description: "Suggested GL account code e.g. 610-010" }
-                  },
-                  required: ["description", "amount"]
-                },
-                description: "Itemized list of purchased goods or services"
-              },
-              subtotal: { type: Type.NUMBER, description: "Subtotal before tax in RM" },
-              sstTaxAmount: { type: Type.NUMBER, description: "SST / Service tax amount in RM" },
-              rounding: { type: Type.NUMBER, description: "Rounding adjustment in RM if any" },
-              totalAmount: { type: Type.NUMBER, description: "Total gross amount in Malaysian Ringgit (RM)" },
-              analysisNotes: { type: Type.STRING, description: "Assistive review notes flagging any math mismatch, missing receipt number, or tax details" }
-            },
-            required: ["merchantName", "transactionDate", "totalAmount", "lineItems"]
-          };
-
-          // Try backend /api/ocr first with header API key if activeApiKey is a custom key
-          try {
-            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-            if (activeApiKey && activeApiKey !== 'backend') {
-              headers['x-gemini-api-key'] = activeApiKey;
-            }
-
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 25000);
-
-            const res = await fetch('/api/ocr', {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({ image: cleanBase64, mimeType: cleanMime }),
-              signal: controller.signal
-            });
-
-            clearTimeout(timeoutId);
-
-            if (res.ok) {
-              const json = await res.json();
-              if (json.success) {
-                extractedData = json.data;
-              }
-            }
-          } catch (netErr) {
-            console.warn('Backend /api/ocr call failed or unreachable, trying direct client SDK fallback...', netErr);
-          }
-
-          // If backend failed, try direct client GoogleGenAI SDK fallback if we have a key
-          if (!extractedData && activeApiKey && activeApiKey !== 'backend') {
-            const ai = new GoogleGenAI({ apiKey: activeApiKey });
-            const response = await ai.models.generateContent({
-              model: 'gemini-3.8-flash',
-              contents: [
-                { inlineData: { data: cleanBase64, mimeType: cleanMime } },
-                { text: "Analyze this Malaysian receipt, invoice, or tax bill. Extract merchantName, merchantRegNo (SSM), documentType, receiptNumber, transactionDate (DD/MM/YYYY), lineItems (description, quantity, unitPrice, amount, suggestedGlCode), subtotal, sstTaxAmount, rounding, totalAmount (RM), and analysisNotes." }
-              ],
-              config: {
-                responseMimeType: 'application/json',
-                responseSchema: receiptSchema,
-                thinkingConfig: { thinkingLevel: 'LOW' } as any
-              }
-            });
-            if (response.text) {
-              extractedData = JSON.parse(response.text);
-            }
-          }
-
-          if (!extractedData) {
-            throw new Error('Gemini OCR extraction failed across backend and client SDK.');
-          }
-
-          setOcrStatusText('Step 3/3: Populating particulars & GL codes...');
-          const extracted = extractedData;
-
-          if (extracted.analysisNotes) {
-            setAnalysisNotes(extracted.analysisNotes);
-          }
-
-          // Parse transaction date to YYYY-MM-DD if in DD/MM/YYYY
-          let parsedDate = voucherDate;
-          if (extracted.transactionDate) {
-            const parts = extracted.transactionDate.split(/[/.-]/);
-            if (parts.length === 3) {
-              if (parts[2].length === 4) {
-                parsedDate = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
-              } else if (parts[0].length === 4) {
-                parsedDate = extracted.transactionDate;
-              }
-            }
-          }
-          if (parsedDate) {
-            setVoucherDate(parsedDate);
-          }
-
-          // Convert line items
-          const newItems: ExpenseItem[] = (extracted.lineItems || []).map((li: any, idx: number) => {
-            const defaultGL = GL_ACCOUNTS[0];
-            const matchedGL = GL_ACCOUNTS.find(g => 
-              li.suggestedGlCode?.toLowerCase().includes(g.code.toLowerCase()) ||
-              li.description?.toLowerCase().includes(g.name.toLowerCase())
-            ) || defaultGL;
-
-            const lineAmount = li.amount || (li.quantity && li.unitPrice ? li.quantity * li.unitPrice : 0);
-
-            let thumbnail = mimeType === 'application/pdf' ? 'https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?auto=format&fit=crop&w=800&q=80' : base64Data;
-            if (thumbnail.length > 200000) {
-              thumbnail = 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=800&q=80';
-            }
-
-            return {
-              lineNo: items.length + idx + 1,
-              date: parsedDate,
-              merchant: extracted.merchantName || 'Unknown Merchant',
-              receiptNo: extracted.receiptNumber || `RCP-${Math.floor(1000 + Math.random() * 9000)}`,
-              particulars: li.description || 'General Business Expense',
-              accountCode: matchedGL.code,
-              accountName: matchedGL.name,
-              taxCode: extracted.sstTaxAmount > 0 ? 'SV' : 'NR',
-              taxAmountRM: extracted.sstTaxAmount ? extracted.sstTaxAmount / (extracted.lineItems.length || 1) : 0,
-              netAmountRM: lineAmount,
-              amountRM: lineAmount,
-              receiptImageUrl: thumbnail
-            };
-          });
-
-          if (newItems.length === 0) {
-            const defaultGL = GL_ACCOUNTS[0];
-            newItems.push({
-              lineNo: items.length + 1,
-              date: parsedDate,
-              merchant: extracted.merchantName || 'Unknown Merchant',
-              receiptNo: extracted.receiptNumber || `RCP-${Math.floor(1000 + Math.random() * 9000)}`,
-              particulars: extracted.documentType ? `${extracted.documentType} - General Expense` : 'General Business Expense',
-              accountCode: defaultGL.code,
-              accountName: defaultGL.name,
-              taxCode: 'NR',
-              taxAmountRM: extracted.sstTaxAmount || 0,
-              netAmountRM: extracted.totalAmount || 0,
-              amountRM: extracted.totalAmount || 100.00,
-              receiptImageUrl: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=800&q=80'
-            });
-          }
-
-          setItems(prev => [...prev, ...newItems]);
-          setErrorMsg(null);
-          return;
-        } catch (err: any) {
-          console.warn(`OCR attempt ${attempt} failed:`, err);
-          if (attempt < maxAttempts) {
-            attempt++;
-            await new Promise(r => setTimeout(r, 2000));
-          } else {
-            throw err;
+    while (attempt <= maxAttempts) {
+      try {
+        let cleanBase64 = item.base64Data;
+        let cleanMime = item.mimeType;
+        if (item.base64Data.startsWith('data:')) {
+          const matches = item.base64Data.match(/^data:([^;]+);base64,(.+)$/);
+          if (matches) {
+            cleanMime = matches[1];
+            cleanBase64 = matches[2];
           }
         }
+
+        const receiptSchema: Schema = {
+          type: Type.OBJECT,
+          properties: {
+            merchantName: { type: Type.STRING },
+            merchantRegNo: { type: Type.STRING },
+            documentType: { type: Type.STRING },
+            receiptNumber: { type: Type.STRING },
+            transactionDate: { type: Type.STRING },
+            lineItems: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  description: { type: Type.STRING },
+                  quantity: { type: Type.NUMBER },
+                  unitPrice: { type: Type.NUMBER },
+                  amount: { type: Type.NUMBER },
+                  suggestedGlCode: { type: Type.STRING }
+                },
+                required: ["description", "amount"]
+              }
+            },
+            subtotal: { type: Type.NUMBER },
+            sstTaxAmount: { type: Type.NUMBER },
+            rounding: { type: Type.NUMBER },
+            totalAmount: { type: Type.NUMBER },
+            analysisNotes: { type: Type.STRING }
+          },
+          required: ["merchantName", "transactionDate", "totalAmount", "lineItems"]
+        };
+
+        let extractedData: any = null;
+
+        // Try backend /api/ocr
+        try {
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          if (activeApiKey && activeApiKey !== 'backend') {
+            headers['x-gemini-api-key'] = activeApiKey;
+          }
+
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s timeout for turbo
+
+          const res = await fetch('/api/ocr', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ image: cleanBase64, mimeType: cleanMime, turboMode }),
+            signal: controller.signal
+          });
+
+          clearTimeout(timeoutId);
+
+          if (res.ok) {
+            const json = await res.json();
+            if (json.success) {
+              extractedData = json.data;
+            }
+          }
+        } catch (netErr) {
+          console.warn('Backend /api/ocr call failed, trying client SDK fallback:', netErr);
+        }
+
+        // Client SDK fallback if backend failed
+        if (!extractedData && activeApiKey && activeApiKey !== 'backend') {
+          const ai = new GoogleGenAI({ apiKey: activeApiKey });
+          const modelToUse = turboMode ? 'gemini-3.5-flash-lite' : 'gemini-3.8-flash';
+          const response = await ai.models.generateContent({
+            model: modelToUse,
+            contents: [
+              { inlineData: { data: cleanBase64, mimeType: cleanMime } },
+              { text: "Analyze Malaysian receipt. Return strict JSON: merchantName, merchantRegNo, documentType, receiptNumber, transactionDate (DD/MM/YYYY), lineItems (description, quantity, unitPrice, amount, suggestedGlCode), subtotal, sstTaxAmount, rounding, totalAmount, analysisNotes." }
+            ],
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: receiptSchema,
+              thinkingConfig: { thinkingLevel: 'LOW' } as any
+            }
+          });
+          if (response.text) {
+            extractedData = JSON.parse(response.text);
+          }
+        }
+
+        if (!extractedData) {
+          throw new Error('OCR extraction failed');
+        }
+
+        if (extractedData.analysisNotes) {
+          setAnalysisNotes(extractedData.analysisNotes);
+        }
+
+        let parsedDate = voucherDate;
+        if (extractedData.transactionDate) {
+          const parts = extractedData.transactionDate.split(/[/.-]/);
+          if (parts.length === 3) {
+            if (parts[2].length === 4) {
+              parsedDate = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+            } else if (parts[0].length === 4) {
+              parsedDate = extractedData.transactionDate;
+            }
+          }
+        }
+        if (parsedDate) setVoucherDate(parsedDate);
+
+        const newItems: ExpenseItem[] = (extractedData.lineItems || []).map((li: any, idx: number) => {
+          const defaultGL = GL_ACCOUNTS[0];
+          const matchedGL = GL_ACCOUNTS.find(g => 
+            li.suggestedGlCode?.toLowerCase().includes(g.code.toLowerCase()) ||
+            li.description?.toLowerCase().includes(g.name.toLowerCase())
+          ) || defaultGL;
+
+          const lineAmount = li.amount || (li.quantity && li.unitPrice ? li.quantity * li.unitPrice : 0);
+          let thumbnail = item.base64Data.length > 200000 ? 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=800&q=80' : item.base64Data;
+
+          return {
+            lineNo: items.length + idx + 1,
+            date: parsedDate,
+            merchant: extractedData.merchantName || 'Unknown Merchant',
+            receiptNo: extractedData.receiptNumber || `RCP-${Math.floor(1000 + Math.random() * 9000)}`,
+            particulars: li.description || 'General Business Expense',
+            accountCode: matchedGL.code,
+            accountName: matchedGL.name,
+            taxCode: extractedData.sstTaxAmount > 0 ? 'SV' : 'NR',
+            taxAmountRM: extractedData.sstTaxAmount ? extractedData.sstTaxAmount / (extractedData.lineItems.length || 1) : 0,
+            netAmountRM: lineAmount,
+            amountRM: lineAmount,
+            receiptImageUrl: thumbnail
+          };
+        });
+
+        if (newItems.length === 0) {
+          const defaultGL = GL_ACCOUNTS[0];
+          newItems.push({
+            lineNo: items.length + 1,
+            date: parsedDate,
+            merchant: extractedData.merchantName || 'Unknown Merchant',
+            receiptNo: extractedData.receiptNumber || `RCP-${Math.floor(1000 + Math.random() * 9000)}`,
+            particulars: extractedData.documentType ? `${extractedData.documentType} - General Expense` : 'General Business Expense',
+            accountCode: defaultGL.code,
+            accountName: defaultGL.name,
+            taxCode: 'NR',
+            taxAmountRM: extractedData.sstTaxAmount || 0,
+            netAmountRM: extractedData.totalAmount || 0,
+            amountRM: extractedData.totalAmount || 100.00,
+            receiptImageUrl: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=800&q=80'
+          });
+        }
+
+        setItems(prev => [...prev, ...newItems]);
+        setUploadQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'done' } : q));
+        return;
+      } catch (err: any) {
+        console.warn(`Queue item ${item.fileName} attempt ${attempt} failed:`, err);
+        if (attempt < maxAttempts) {
+          attempt++;
+          await new Promise(r => setTimeout(r, 1000));
+        } else {
+          setUploadQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'error', errorText: err.message } : q));
+          break;
+        }
       }
-    } catch (err: any) {
-      console.error('OCR Process Error:', err);
-      const msg = String(err?.message || err);
-      if (msg.includes('MISSING_API_KEY') || msg.includes('500') || !activeApiKey) {
-        setErrorMsg('Server Gemini API key is not configured. Please ask your Admin to save the Shared Company Gemini API Key in Team Settings.');
-      } else if (msg.includes('503') || msg.includes('429') || msg.includes('busy') || msg.includes('timed out')) {
-        setErrorMsg('Gemini OCR is temporarily busy due to high traffic. You can click Retry Scan or enter the item manually below.');
-      } else {
-        setErrorMsg(`OCR Error: ${msg}`);
-      }
-    } finally {
-      setIsAnalyzing(false);
     }
   };
 
-  const handleRetryScan = () => {
-    if (lastUploadedFile) {
-      processImageWithOCR(lastUploadedFile.base64, lastUploadedFile.mimeType);
-    }
+  const handleRetryItem = (item: UploadQueueItem) => {
+    setUploadQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'scanning', errorText: undefined } : q));
+    processQueueItem(item);
   };
 
   const addManualItem = () => {
@@ -453,29 +491,47 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
       <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden border border-slate-200">
         
         {/* Modal Header */}
-        <div className="px-6 py-4 bg-slate-900 text-white flex justify-between items-center">
+        <div className="px-6 py-4 bg-slate-900 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center space-x-3">
             <div className="bg-emerald-600 p-2 rounded-lg text-white">
               <Sparkles className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-lg font-bold">New Staff Expense Claim & AI Receipt OCR</h2>
+              <h2 className="text-lg font-bold">New Staff Expense Claim & AI Turbo OCR</h2>
               <div className="flex items-center space-x-2 mt-0.5">
                 {geminiStatus?.connected ? (
                   <span className="inline-flex items-center text-[10px] font-medium text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-800">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 animate-pulse"></span>
-                    Google Gemini Connected ({geminiStatus.model}) {geminiStatus.keySource ? `• ${geminiStatus.keySource}` : ''}
+                    Google Gemini Connected ({geminiStatus.model})
                   </span>
                 ) : (
                   <span className="inline-flex items-center text-[10px] font-medium text-amber-400 bg-amber-950/80 px-2 py-0.5 rounded border border-amber-800">
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 mr-1.5"></span>
-                    Gemini API Key Missing (Ask Admin to configure Shared API Key in Team Settings)
+                    Gemini API Key Missing (Configure in Team Settings)
                   </span>
                 )}
               </div>
             </div>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white p-1 rounded-lg">
+
+          {/* AI Turbo Mode Toggle */}
+          <div className="flex items-center space-x-2 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700">
+            <Zap className={`w-4 h-4 ${turboMode ? 'text-amber-400 animate-pulse' : 'text-slate-400'}`} />
+            <span className="text-xs font-medium">AI Turbo Mode</span>
+            <button
+              type="button"
+              onClick={() => setTurboMode(!turboMode)}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                turboMode ? 'bg-amber-500' : 'bg-slate-600'
+              }`}
+            >
+              <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                turboMode ? 'translate-x-4' : 'translate-x-0'
+              }`} />
+            </button>
+          </div>
+
+          <button onClick={onClose} className="text-slate-400 hover:text-white p-1 rounded-lg hidden sm:block">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -484,22 +540,9 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
         <form onSubmit={handleSubmit} className="p-6 overflow-y-auto space-y-6 flex-1">
           
           {errorMsg && (
-            <div className="p-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm">
-              <div className="flex items-center space-x-2">
-                <AlertCircle className="w-5 h-5 shrink-0 text-amber-600" />
-                <span>{errorMsg}</span>
-              </div>
-              {lastUploadedFile && (
-                <button
-                  type="button"
-                  onClick={handleRetryScan}
-                  disabled={isAnalyzing}
-                  className="inline-flex items-center space-x-1.5 bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded-lg text-xs font-semibold shadow-2xs transition shrink-0"
-                >
-                  <RotateCw className="w-3.5 h-3.5" />
-                  <span>Retry Scan</span>
-                </button>
-              )}
+            <div className="p-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-sm flex items-center space-x-2">
+              <AlertCircle className="w-5 h-5 shrink-0 text-amber-600" />
+              <span>{errorMsg}</span>
             </div>
           )}
 
@@ -592,7 +635,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
             )}
           </div>
 
-          {/* Receipt Upload & AI OCR Banner */}
+          {/* Receipt Upload & AI Turbo Scan Banner */}
           <div className="border-2 border-dashed border-emerald-300 bg-emerald-50/50 rounded-xl p-6 text-center hover:bg-emerald-50 transition relative">
             <input
               type="file"
@@ -602,23 +645,61 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
             />
             <div className="flex flex-col items-center justify-center space-y-2">
-              {isAnalyzing ? (
+              {isAnyScanning ? (
                 <>
                   <Loader2 className="w-8 h-8 text-emerald-600 animate-spin" />
-                  <p className="text-sm font-bold text-emerald-900">{ocrStatusText}</p>
-                  <p className="text-xs text-emerald-700">Extracting merchant, date, invoice number & amounts automatically</p>
+                  <p className="text-sm font-bold text-emerald-900">⚡ AI Turbo Scan processing receipts in parallel...</p>
+                  <p className="text-xs text-emerald-700">Form remains fully editable while AI extracts line items.</p>
                 </>
               ) : (
                 <>
                   <div className="bg-emerald-600 text-white p-3 rounded-full shadow-sm">
                     <Upload className="w-6 h-6" />
                   </div>
-                  <p className="text-sm font-bold text-slate-800">Drop receipt / invoice images here, or click to upload</p>
-                  <p className="text-xs text-slate-500">Supports JPG, PNG, WebP & PDF. Gemini 3.8 Flash OCR will auto-fill particulars.</p>
+                  <p className="text-sm font-bold text-slate-800">Drop multiple receipt images or PDFs here (Parallel Scan)</p>
+                  <p className="text-xs text-slate-500">⚡ AI Turbo pre-processor renders PDFs & compresses images to 1024px for 2–4s extraction.</p>
                 </>
               )}
             </div>
           </div>
+
+          {/* Upload Queue Status List */}
+          {uploadQueue.length > 0 && (
+            <div className="space-y-2 bg-slate-50 p-4 rounded-xl border border-slate-200">
+              <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block">Parallel Scan Queue ({uploadQueue.length})</span>
+              <div className="space-y-2">
+                {uploadQueue.map(item => (
+                  <div key={item.id} className="flex items-center justify-between bg-white p-2.5 rounded-lg border border-slate-200 text-xs">
+                    <span className="font-medium text-slate-800 truncate max-w-xs">{item.fileName}</span>
+                    <div className="flex items-center space-x-2">
+                      {item.status === 'scanning' && (
+                        <span className="inline-flex items-center text-amber-700 bg-amber-50 px-2 py-0.5 rounded font-medium">
+                          <Loader2 className="w-3 h-3 mr-1 animate-spin" /> Scanning...
+                        </span>
+                      )}
+                      {item.status === 'done' && (
+                        <span className="inline-flex items-center text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded font-medium">
+                          <Check className="w-3 h-3 mr-1" /> Done
+                        </span>
+                      )}
+                      {item.status === 'error' && (
+                        <div className="flex items-center space-x-2">
+                          <span className="text-rose-600 font-medium">Error</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRetryItem(item)}
+                            className="px-2 py-1 bg-amber-600 text-white rounded text-[10px] font-semibold"
+                          >
+                            Retry
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Expense Items List */}
           <div className="space-y-4">
@@ -636,7 +717,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
 
             {items.length === 0 ? (
               <div className="text-center py-8 bg-slate-50 rounded-xl border border-dashed border-slate-300 text-slate-500 text-xs">
-                No receipt items added yet. Upload a receipt above or click "Add Row Manually".
+                No receipt items added yet. Upload receipts above or click "Add Row Manually".
               </div>
             ) : (
               <div className="space-y-4">
@@ -770,7 +851,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={isAnalyzing || items.length === 0}
+              disabled={items.length === 0}
               className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium shadow-sm disabled:opacity-50"
             >
               Submit Claim for Approval
