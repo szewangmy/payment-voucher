@@ -37,7 +37,6 @@ async function callGeminiWithRetry(ai: GoogleGenAI, base64Data: string, detected
           config: {
             responseMimeType: 'application/json',
             responseSchema: receiptSchema,
-            temperature: 0.1,
             thinkingConfig: { thinkingLevel: 'LOW' } as any
           }
         });
@@ -81,6 +80,7 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
+  // Ensure JSON and urlencoded parsers are registered before all routes
   app.use(express.json({ limit: '25mb' }));
   app.use(express.urlencoded({ limit: '25mb', extended: true }));
 
@@ -93,14 +93,14 @@ async function startServer() {
     try {
       const { image, mimeType } = req.body;
       if (!image) {
-        return res.status(400).json({ error: 'No image provided for OCR' });
+        return res.status(400).json({ success: false, error: 'No image provided for OCR' });
       }
 
       if (!apiKey) {
-        return res.status(500).json({ error: 'GEMINI_API_KEY is not configured in environment variables.' });
+        return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured in environment variables.' });
       }
 
-      // Clean base64 data URL if present
+      // Strip data URI prefix if present and extract clean base64 data & mimeType
       let base64Data = image;
       let detectedMime = mimeType || 'image/jpeg';
       if (image.startsWith('data:')) {

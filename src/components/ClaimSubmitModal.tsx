@@ -23,9 +23,61 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
   
   const [items, setItems] = useState<ExpenseItem[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
-  const [ocrStatusText, setOcrStatusText] = useState<string>('Gemini AI OCR is reading your receipt(s)...');
+  const [ocrStatusText, setOcrStatusText] = useState<string>('Step 1/3: Reading receipt file...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [lastUploadedFile, setLastUploadedFile] = useState<{ base64: string; mimeType: string } | null>(null);
+
+  // Robust FileReader helper with both onload and onerror attached
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === 'string') {
+          resolve(reader.result);
+        } else {
+          reject(new Error('Failed to convert file to base64 string'));
+        }
+      };
+      reader.onerror = (error) => reject(error || new Error('FileReader error'));
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // Optional image resizing helper for large images (skips PDF)
+  const compressImageIfNeeded = (dataUrl: string): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+        const maxDim = 1200;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.85));
+        } else {
+          resolve(dataUrl);
+        }
+      };
+      img.onerror = () => {
+        // If image loading fails, resolve original dataUrl to avoid hanging
+        resolve(dataUrl);
+      };
+      img.src = dataUrl;
+    });
+  };
 
   // Handle Receipt Upload & AI OCR via backend proxy
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -34,11 +86,26 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const base64Data = await fileToBase64(file);
       const mimeType = file.type || 'image/jpeg';
+      
+      setOcrStatusText('Step 1/3: Reading receipt file...');
+      setIsAnalyzing(true);
+      setErrorMsg(null);
 
-      setLastUploadedFile({ base64: base64Data, mimeType });
-      await processImageWithOCR(base64Data, mimeType);
+      try {
+        let base64Data = await fileToBase64(file);
+
+        if (mimeType.startsWith('image/')) {
+          base64Data = await compressImageIfNeeded(base64Data);
+        }
+
+        setLastUploadedFile({ base64: base64Data, mimeType });
+        await processImageWithOCR(base64Data, mimeType);
+      } catch (err: any) {
+        console.error('File Read Error:', err);
+        setErrorMsg('Failed to read receipt file. Please try another image or PDF.');
+        setIsAnalyzing(false);
+      }
     }
     // reset file input
     e.target.value = '';
@@ -47,7 +114,6 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
   const processImageWithOCR = async (base64Data: string, mimeType: string) => {
     setIsAnalyzing(true);
     setErrorMsg(null);
-    setOcrStatusText('Gemini AI OCR is reading your receipt(s)...');
 
     let attempt = 1;
     const maxAttempts = 3;
@@ -55,12 +121,14 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     try {
       while (attempt <= maxAttempts) {
         try {
-          if (attempt > 1) {
+          if (attempt === 1) {
+            setOcrStatusText('Step 2/3: Uploading to Gemini 3.8 Flash OCR...');
+          } else {
             setOcrStatusText(`AI server is busy—retrying automatically (Attempt ${attempt}/3)...`);
           }
 
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
+          const timeoutId = setTimeout(() => controller.abort(), 20000); // Strict 20s timeout
 
           const res = await fetch('/api/ocr', {
             method: 'POST',
@@ -76,6 +144,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
             throw new Error(json.error || 'Gemini OCR extraction failed');
           }
 
+          setOcrStatusText('Step 3/3: Extracting line items...');
           const extracted = json.data;
           const defaultGL = GL_ACCOUNTS[0];
 
@@ -106,7 +175,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
         } catch (err: any) {
           console.warn(`OCR attempt ${attempt} failed:`, err);
           if (err.name === 'AbortError') {
-            throw new Error('OCR request timed out after 25 seconds.');
+            throw new Error('OCR request timed out after 20 seconds.');
           }
           if (attempt < maxAttempts) {
             attempt++;
@@ -128,15 +197,6 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     if (lastUploadedFile) {
       processImageWithOCR(lastUploadedFile.base64, lastUploadedFile.mimeType);
     }
-  };
-
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = error => reject(error);
-    });
   };
 
   const addManualItem = () => {
