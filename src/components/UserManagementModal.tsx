@@ -5,6 +5,9 @@ import { db } from '../firebase';
 import { collection, getDocs, doc, updateDoc, setDoc, getDoc } from 'firebase/firestore';
 import { Shield, Users, Check, X, Building2, UserCheck, Key, Save, Sparkles, AlertCircle } from 'lucide-react';
 
+const SYSTEM_SETTINGS_COLLECTION = 'system_settings';
+const GEMINI_CONFIG_DOC = 'gemini_config';
+
 interface UserManagementModalProps {
   currentUser: UserProfile;
   onClose: () => void;
@@ -17,6 +20,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
   const [usersList, setUsersList] = useState<UserProfile[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [sharedApiKey, setSharedApiKey] = useState<string>('');
+  const [existingKeyMasked, setExistingKeyMasked] = useState<string | null>(null);
   const [isSavingKey, setIsSavingKey] = useState<boolean>(false);
   const [keySavedSuccess, setKeySavedSuccess] = useState<boolean>(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -46,11 +50,17 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
 
   const fetchSharedApiKey = async () => {
     try {
-      const docSnap = await getDoc(doc(db, 'system_settings', 'gemini_config'));
+      const docSnap = await getDoc(doc(db, SYSTEM_SETTINGS_COLLECTION, GEMINI_CONFIG_DOC));
       if (docSnap.exists()) {
         const data = docSnap.data();
         if (data.apiKey) {
           setSharedApiKey(data.apiKey);
+          const key = data.apiKey;
+          if (key.length > 10) {
+            setExistingKeyMasked(`${key.substring(0, 6)}...${key.substring(key.length - 4)}`);
+          } else {
+            setExistingKeyMasked('Active');
+          }
         }
       }
     } catch (err) {
@@ -60,24 +70,42 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
 
   const handleSaveSharedKey = async (e: React.FormEvent) => {
     e.preventDefault();
+    const trimmedKey = sharedApiKey.trim();
+    if (!trimmedKey) {
+      setErrorMsg('Please enter a valid Gemini API key.');
+      return;
+    }
+
     setIsSavingKey(true);
     setKeySavedSuccess(false);
     setErrorMsg(null);
     try {
-      await setDoc(doc(db, 'system_settings', 'gemini_config'), {
-        apiKey: sharedApiKey.trim(),
+      // 1. Save to Firestore
+      await setDoc(doc(db, SYSTEM_SETTINGS_COLLECTION, GEMINI_CONFIG_DOC), {
+        apiKey: trimmedKey,
         updatedBy: currentUser.email || currentUser.name,
         updatedAt: new Date().toISOString()
       }, { merge: true });
+
+      // 2. Send to backend server cache immediately via POST /api/gemini/config
+      await fetch('/api/gemini/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: trimmedKey })
+      }).catch(err => console.warn('Server config cache notification failed:', err));
+
       setKeySavedSuccess(true);
-      setToastMsg('Shared Gemini API key saved successfully.');
+      if (trimmedKey.length > 10) {
+        setExistingKeyMasked(`${trimmedKey.substring(0, 6)}...${trimmedKey.substring(trimmedKey.length - 4)}`);
+      }
+      setToastMsg('Shared Gemini API Key saved and active for all staff!');
       setTimeout(() => {
         setKeySavedSuccess(false);
         setToastMsg(null);
-      }, 3000);
+      }, 4000);
     } catch (err: any) {
       console.error('Error saving shared API key:', err);
-      setErrorMsg(err.message || 'Failed to save shared API key.');
+      setErrorMsg(`Failed to save shared API key to Firestore: ${err.message || err}. (Ensure firestore.rules are published).`);
     } finally {
       setIsSavingKey(false);
     }
@@ -146,17 +174,28 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
           )}
 
           {errorMsg && (
-            <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl text-xs flex items-center space-x-2">
-              <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+            <div className="p-4 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl text-xs flex items-center space-x-2">
+              <AlertCircle className="w-5 h-5 shrink-0 text-rose-600" />
               <span>{errorMsg}</span>
             </div>
           )}
 
           {/* Shared Company Gemini API Key Section */}
           <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 space-y-3">
-            <div className="flex items-center space-x-2 text-emerald-900 font-bold text-sm">
-              <Key className="w-4 h-4 text-emerald-700" />
-              <span>Shared Company Gemini API Key (Universal Fallback)</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2 text-emerald-900 font-bold text-sm">
+                <Key className="w-4 h-4 text-emerald-700" />
+                <span>Shared Company Gemini API Key (Universal Fallback)</span>
+              </div>
+              {existingKeyMasked ? (
+                <span className="px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-full text-xs font-mono font-bold">
+                  Shared Key Active ({existingKeyMasked})
+                </span>
+              ) : (
+                <span className="px-2.5 py-1 bg-amber-100 text-amber-800 rounded-full text-xs font-bold">
+                  No Shared Key Saved Yet
+                </span>
+              )}
             </div>
             <p className="text-xs text-slate-600">
               Save your company's Gemini API key here so all Staff, Managers, and Accounts users have instant access to AI Receipt OCR across any browser or hosting environment without needing server restarts.
@@ -182,7 +221,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
 
             {keySavedSuccess && (
               <p className="text-xs text-emerald-700 font-semibold flex items-center">
-                <Check className="w-3.5 h-3.5 mr-1" /> Shared Gemini API key successfully saved to Firestore!
+                <Check className="w-3.5 h-3.5 mr-1" /> Shared Gemini API Key saved and active for all staff!
               </p>
             )}
           </div>

@@ -8,6 +8,9 @@ import { createServer as createViteServer } from 'vite';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// In-memory runtime cache for shared company API key saved by Admin
+let inMemorySharedApiKey = '';
+
 async function callGeminiWithCrossModelRetry(apiKey: string, base64Data: string, detectedMime: string, receiptSchema: Schema) {
   const ai = new GoogleGenAI({ apiKey });
   const models = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash-lite', 'gemini-4-hydrogen'];
@@ -80,13 +83,23 @@ async function startServer() {
   app.use(express.json({ limit: '25mb' }));
   app.use(express.urlencoded({ limit: '25mb', extended: true }));
 
-  // Gemini Connection Status Endpoint supporting header API key or env vars
+  // Receive POST /api/gemini/config to cache shared API key in memory immediately
+  app.post('/api/gemini/config', (req, res) => {
+    const { apiKey } = req.body;
+    if (apiKey && typeof apiKey === 'string') {
+      inMemorySharedApiKey = apiKey.trim();
+      return res.json({ success: true });
+    }
+    return res.status(400).json({ success: false, error: 'Invalid API key provided' });
+  });
+
+  // Gemini Connection Status Endpoint
   app.get('/api/gemini/status', (req, res) => {
     const headerKey = req.headers['x-gemini-api-key'] as string;
     const envKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.VITE_GEMINI_API_KEY;
-    const apiKey = headerKey || envKey;
+    const apiKey = headerKey || inMemorySharedApiKey || envKey;
     const connected = Boolean(apiKey && apiKey.length > 5);
-    const keySource = headerKey ? 'HEADER_KEY' : process.env.GEMINI_API_KEY ? 'GEMINI_API_KEY' : process.env.API_KEY ? 'API_KEY' : process.env.VITE_GEMINI_API_KEY ? 'VITE_GEMINI_API_KEY' : 'NONE';
+    const keySource = headerKey ? 'HEADER_KEY' : inMemorySharedApiKey ? 'FIRESTORE_IN_MEMORY_CACHE' : process.env.GEMINI_API_KEY ? 'GEMINI_API_KEY' : process.env.API_KEY ? 'API_KEY' : process.env.VITE_GEMINI_API_KEY ? 'VITE_GEMINI_API_KEY' : 'NONE';
     return res.json({ connected, keySource, model: 'gemini-3.8-flash' });
   });
 
@@ -95,7 +108,8 @@ async function startServer() {
     try {
       const headerKey = req.headers['x-gemini-api-key'] as string;
       const envKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.VITE_GEMINI_API_KEY;
-      const apiKey = headerKey || envKey;
+      const bodyKey = req.body.apiKey;
+      const apiKey = headerKey || bodyKey || inMemorySharedApiKey || envKey;
 
       if (!apiKey) {
         return res.status(500).json({ 

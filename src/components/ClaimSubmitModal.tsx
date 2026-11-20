@@ -2,9 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { UserProfile, ClaimVoucher, ExpenseItem } from '../types';
 import { COMPANIES, GL_ACCOUNTS } from '../data/mockData';
 import { db } from '../firebase';
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { GoogleGenAI, Schema, Type } from '@google/genai';
 import { Upload, Sparkles, X, Plus, Trash2, Check, AlertCircle, Loader2, RotateCw, CheckCircle2 } from 'lucide-react';
+
+const SYSTEM_SETTINGS_COLLECTION = 'system_settings';
+const GEMINI_CONFIG_DOC = 'gemini_config';
 
 interface ClaimSubmitModalProps {
   currentUser: UserProfile;
@@ -37,37 +40,42 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
   const [activeApiKey, setActiveApiKey] = useState<string | null>(null);
 
   useEffect(() => {
-    checkGeminiConnection();
-  }, []);
-
-  const checkGeminiConnection = async () => {
-    try {
-      const res = await fetch('/api/gemini/status');
-      const data = await res.json();
-      if (data.connected) {
-        setGeminiStatus(data);
-        setActiveApiKey('backend');
-        return;
+    // 1. Check server status endpoint
+    const checkServerStatus = async () => {
+      try {
+        const res = await fetch('/api/gemini/status');
+        const data = await res.json();
+        if (data.connected) {
+          setGeminiStatus(data);
+          setActiveApiKey('backend');
+          return true;
+        }
+      } catch (err) {
+        console.warn('Backend status endpoint unreachable');
       }
-    } catch (err) {
-      console.warn('Backend status endpoint unreachable, checking Firestore shared key...');
-    }
+      return false;
+    };
 
-    // Fallback: check Firestore system_settings/gemini_config
-    try {
-      const docSnap = await getDoc(doc(db, 'system_settings', 'gemini_config'));
+    // 2. Real-time subscription to Firestore shared gemini config
+    const unsubscribe = onSnapshot(doc(db, SYSTEM_SETTINGS_COLLECTION, GEMINI_CONFIG_DOC), async (docSnap) => {
       if (docSnap.exists() && docSnap.data().apiKey) {
         const key = docSnap.data().apiKey;
-        setGeminiStatus({ connected: true, model: 'gemini-3.8-flash', keySource: 'Firestore Shared Key' });
+        setGeminiStatus({ connected: true, model: 'gemini-3.8-flash', keySource: 'Shared Company Key' });
         setActiveApiKey(key);
-        return;
+      } else {
+        const hasServerKey = await checkServerStatus();
+        if (!hasServerKey) {
+          setGeminiStatus({ connected: false, model: 'gemini-3.8-flash' });
+          setActiveApiKey(null);
+        }
       }
-    } catch (err) {
-      console.warn('Failed to fetch Firestore shared API key:', err);
-    }
+    }, (err) => {
+      console.warn('Snapshot subscription error:', err);
+      checkServerStatus();
+    });
 
-    setGeminiStatus({ connected: false, model: 'gemini-3.8-flash' });
-  };
+    return () => unsubscribe();
+  }, []);
 
   // Robust FileReader helper with both onload and onerror attached
   const fileToBase64 = (file: File): Promise<string> => {
