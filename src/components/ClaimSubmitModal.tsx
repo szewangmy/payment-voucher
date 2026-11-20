@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, ClaimVoucher, ExpenseItem } from '../types';
 import { COMPANIES, GL_ACCOUNTS } from '../data/mockData';
+import { db } from '../firebase';
+import { doc, getDoc } from 'firebase/firestore';
+import { GoogleGenAI, Schema, Type } from '@google/genai';
 import { Upload, Sparkles, X, Plus, Trash2, Check, AlertCircle, Loader2, RotateCw, CheckCircle2 } from 'lucide-react';
 
 interface ClaimSubmitModalProps {
@@ -30,14 +33,41 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
   const [lastUploadedFile, setLastUploadedFile] = useState<{ base64: string; mimeType: string } | null>(null);
 
   // Gemini Connection Status State
-  const [geminiStatus, setGeminiStatus] = useState<{ connected: boolean; model: string } | null>(null);
+  const [geminiStatus, setGeminiStatus] = useState<{ connected: boolean; model: string; keySource?: string } | null>(null);
+  const [activeApiKey, setActiveApiKey] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch('/api/gemini/status')
-      .then(res => res.json())
-      .then(data => setGeminiStatus(data))
-      .catch(() => setGeminiStatus({ connected: false, model: 'gemini-3.8-flash' }));
+    checkGeminiConnection();
   }, []);
+
+  const checkGeminiConnection = async () => {
+    try {
+      const res = await fetch('/api/gemini/status');
+      const data = await res.json();
+      if (data.connected) {
+        setGeminiStatus(data);
+        setActiveApiKey('backend');
+        return;
+      }
+    } catch (err) {
+      console.warn('Backend status endpoint unreachable, checking Firestore shared key...');
+    }
+
+    // Fallback: check Firestore system_settings/gemini_config
+    try {
+      const docSnap = await getDoc(doc(db, 'system_settings', 'gemini_config'));
+      if (docSnap.exists() && docSnap.data().apiKey) {
+        const key = docSnap.data().apiKey;
+        setGeminiStatus({ connected: true, model: 'gemini-3.8-flash', keySource: 'Firestore Shared Key' });
+        setActiveApiKey(key);
+        return;
+      }
+    } catch (err) {
+      console.warn('Failed to fetch Firestore shared API key:', err);
+    }
+
+    setGeminiStatus({ connected: false, model: 'gemini-3.8-flash' });
+  };
 
   // Robust FileReader helper with both onload and onerror attached
   const fileToBase64 = (file: File): Promise<string> => {
@@ -88,7 +118,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     });
   };
 
-  // Handle Receipt Upload & AI OCR via backend proxy
+  // Handle Receipt Upload & AI OCR via backend proxy or direct SDK fallback
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -135,25 +165,106 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
             setOcrStatusText(`AI server is busy—retrying automatically (Attempt ${attempt}/3)...`);
           }
 
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
+          let extractedData: any = null;
 
-          const res = await fetch('/api/ocr', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image: base64Data, mimeType }),
-            signal: controller.signal
-          });
+          // Clean base64
+          let cleanBase64 = base64Data;
+          let cleanMime = mimeType;
+          if (base64Data.startsWith('data:')) {
+            const matches = base64Data.match(/^data:([^;]+);base64,(.+)$/);
+            if (matches) {
+              cleanMime = matches[1];
+              cleanBase64 = matches[2];
+            }
+          }
 
-          clearTimeout(timeoutId);
+          const receiptSchema: Schema = {
+            type: Type.OBJECT,
+            properties: {
+              merchantName: { type: Type.STRING, description: "Name of the merchant or supplier" },
+              merchantRegNo: { type: Type.STRING, description: "SSM or Company registration number if available" },
+              documentType: { type: Type.STRING, description: "Tax Invoice, Receipt, Cash Bill, or Voucher" },
+              receiptNumber: { type: Type.STRING, description: "Receipt or Invoice or Bill number" },
+              transactionDate: { type: Type.STRING, description: "Date on receipt in DD/MM/YYYY or YYYY-MM-DD format" },
+              lineItems: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    description: { type: Type.STRING, description: "Description of item" },
+                    quantity: { type: Type.NUMBER, description: "Quantity" },
+                    unitPrice: { type: Type.NUMBER, description: "Unit price in RM" },
+                    amount: { type: Type.NUMBER, description: "Total line amount in RM" },
+                    suggestedGlCode: { type: Type.STRING, description: "Suggested GL account code e.g. 610-010" }
+                  },
+                  required: ["description", "amount"]
+                },
+                description: "Itemized list of purchased goods or services"
+              },
+              subtotal: { type: Type.NUMBER, description: "Subtotal before tax in RM" },
+              sstTaxAmount: { type: Type.NUMBER, description: "SST / Service tax amount in RM" },
+              rounding: { type: Type.NUMBER, description: "Rounding adjustment in RM if any" },
+              totalAmount: { type: Type.NUMBER, description: "Total gross amount in Malaysian Ringgit (RM)" },
+              analysisNotes: { type: Type.STRING, description: "Assistive review notes flagging any math mismatch, missing receipt number, or tax details" }
+            },
+            required: ["merchantName", "transactionDate", "totalAmount", "lineItems"]
+          };
 
-          const json = await res.json();
-          if (!json.success) {
-            throw new Error(json.error || 'Gemini OCR extraction failed');
+          // Try backend /api/ocr first with header API key if activeApiKey is a custom key
+          try {
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (activeApiKey && activeApiKey !== 'backend') {
+              headers['x-gemini-api-key'] = activeApiKey;
+            }
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 25000);
+
+            const res = await fetch('/api/ocr', {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({ image: cleanBase64, mimeType: cleanMime }),
+              signal: controller.signal
+            });
+
+            clearTimeout(timeoutId);
+
+            if (res.ok) {
+              const json = await res.json();
+              if (json.success) {
+                extractedData = json.data;
+              }
+            }
+          } catch (netErr) {
+            console.warn('Backend /api/ocr call failed or unreachable, trying direct client SDK fallback...', netErr);
+          }
+
+          // If backend failed, try direct client GoogleGenAI SDK fallback if we have a key
+          if (!extractedData && activeApiKey && activeApiKey !== 'backend') {
+            const ai = new GoogleGenAI({ apiKey: activeApiKey });
+            const response = await ai.models.generateContent({
+              model: 'gemini-3.8-flash',
+              contents: [
+                { inlineData: { data: cleanBase64, mimeType: cleanMime } },
+                { text: "Analyze this Malaysian receipt, invoice, or tax bill. Extract merchantName, merchantRegNo (SSM), documentType, receiptNumber, transactionDate (DD/MM/YYYY), lineItems (description, quantity, unitPrice, amount, suggestedGlCode), subtotal, sstTaxAmount, rounding, totalAmount (RM), and analysisNotes." }
+              ],
+              config: {
+                responseMimeType: 'application/json',
+                responseSchema: receiptSchema,
+                thinkingConfig: { thinkingLevel: 'LOW' } as any
+              }
+            });
+            if (response.text) {
+              extractedData = JSON.parse(response.text);
+            }
+          }
+
+          if (!extractedData) {
+            throw new Error('Gemini OCR extraction failed across backend and client SDK.');
           }
 
           setOcrStatusText('Step 3/3: Populating particulars & GL codes...');
-          const extracted = json.data;
+          const extracted = extractedData;
 
           if (extracted.analysisNotes) {
             setAnalysisNotes(extracted.analysisNotes);
@@ -165,10 +276,8 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
             const parts = extracted.transactionDate.split(/[/.-]/);
             if (parts.length === 3) {
               if (parts[2].length === 4) {
-                // DD/MM/YYYY
                 parsedDate = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
               } else if (parts[0].length === 4) {
-                // YYYY-MM-DD
                 parsedDate = extracted.transactionDate;
               }
             }
@@ -187,7 +296,6 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
 
             const lineAmount = li.amount || (li.quantity && li.unitPrice ? li.quantity * li.unitPrice : 0);
 
-            // Compress image thumbnail if image under 200KB to prevent Firestore 1 MiB limit issues
             let thumbnail = mimeType === 'application/pdf' ? 'https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?auto=format&fit=crop&w=800&q=80' : base64Data;
             if (thumbnail.length > 200000) {
               thumbnail = 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=800&q=80';
@@ -232,9 +340,6 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
           return;
         } catch (err: any) {
           console.warn(`OCR attempt ${attempt} failed:`, err);
-          if (err.name === 'AbortError') {
-            throw new Error('OCR request timed out after 25 seconds.');
-          }
           if (attempt < maxAttempts) {
             attempt++;
             await new Promise(r => setTimeout(r, 2000));
@@ -246,10 +351,8 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     } catch (err: any) {
       console.error('OCR Process Error:', err);
       const msg = String(err?.message || err);
-      if (msg.includes('MISSING_API_KEY') || msg.includes('500')) {
-        setErrorMsg('Server Gemini API key is not configured for this deployment environment. Please add GEMINI_API_KEY in Cloud Run / AI Studio Secrets.');
-      } else if (msg.includes('404') || msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
-        setErrorMsg('Backend OCR server (/api/ocr) is unreachable. Please access the app via the full-stack Cloud Run URL.');
+      if (msg.includes('MISSING_API_KEY') || msg.includes('500') || !activeApiKey) {
+        setErrorMsg('Server Gemini API key is not configured. Please ask your Admin to save the Shared Company Gemini API Key in Team Settings.');
       } else if (msg.includes('503') || msg.includes('429') || msg.includes('busy') || msg.includes('timed out')) {
         setErrorMsg('Gemini OCR is temporarily busy due to high traffic. You can click Retry Scan or enter the item manually below.');
       } else {
@@ -353,12 +456,12 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
                 {geminiStatus?.connected ? (
                   <span className="inline-flex items-center text-[10px] font-medium text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-800">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 animate-pulse"></span>
-                    Google Gemini Connected ({geminiStatus.model})
+                    Google Gemini Connected ({geminiStatus.model}) {geminiStatus.keySource ? `• ${geminiStatus.keySource}` : ''}
                   </span>
                 ) : (
                   <span className="inline-flex items-center text-[10px] font-medium text-amber-400 bg-amber-950/80 px-2 py-0.5 rounded border border-amber-800">
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 mr-1.5"></span>
-                    Gemini API Key Missing (Using Manual Fallback)
+                    Gemini API Key Missing (Ask Admin to configure Shared API Key in Team Settings)
                   </span>
                 )}
               </div>

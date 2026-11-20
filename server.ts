@@ -1,23 +1,16 @@
+import 'dotenv/config';
 import express from 'express';
-import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type, Schema } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 
-dotenv.config();
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-async function callGeminiWithCrossModelRetry(base64Data: string, detectedMime: string, receiptSchema: Schema) {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
-  if (!apiKey) {
-    throw new Error('MISSING_API_KEY');
-  }
-
+async function callGeminiWithCrossModelRetry(apiKey: string, base64Data: string, detectedMime: string, receiptSchema: Schema) {
   const ai = new GoogleGenAI({ apiKey });
-  const models = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-4-hydrogen'];
+  const models = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash-lite', 'gemini-4-hydrogen'];
   const maxRetriesPerModel = 2;
 
   for (const model of models) {
@@ -87,18 +80,23 @@ async function startServer() {
   app.use(express.json({ limit: '25mb' }));
   app.use(express.urlencoded({ limit: '25mb', extended: true }));
 
-  // Gemini Connection Status Endpoint supporting both GEMINI_API_KEY and API_KEY
+  // Gemini Connection Status Endpoint supporting header API key or env vars
   app.get('/api/gemini/status', (req, res) => {
-    const key = process.env.GEMINI_API_KEY || process.env.API_KEY;
-    const connected = Boolean(key && key.length > 5);
-    const keySource = process.env.GEMINI_API_KEY ? 'GEMINI_API_KEY' : process.env.API_KEY ? 'API_KEY' : 'NONE';
+    const headerKey = req.headers['x-gemini-api-key'] as string;
+    const envKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.VITE_GEMINI_API_KEY;
+    const apiKey = headerKey || envKey;
+    const connected = Boolean(apiKey && apiKey.length > 5);
+    const keySource = headerKey ? 'HEADER_KEY' : process.env.GEMINI_API_KEY ? 'GEMINI_API_KEY' : process.env.API_KEY ? 'API_KEY' : process.env.VITE_GEMINI_API_KEY ? 'VITE_GEMINI_API_KEY' : 'NONE';
     return res.json({ connected, keySource, model: 'gemini-3.8-flash' });
   });
 
   // OCR API Endpoint for Receipts / Invoices
   app.post('/api/ocr', async (req, res) => {
     try {
-      const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+      const headerKey = req.headers['x-gemini-api-key'] as string;
+      const envKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.VITE_GEMINI_API_KEY;
+      const apiKey = headerKey || envKey;
+
       if (!apiKey) {
         return res.status(500).json({ 
           success: false, 
@@ -154,7 +152,7 @@ async function startServer() {
         required: ["merchantName", "transactionDate", "totalAmount", "lineItems"]
       };
 
-      const textResult = await callGeminiWithCrossModelRetry(base64Data, detectedMime, receiptSchema);
+      const textResult = await callGeminiWithCrossModelRetry(apiKey, base64Data, detectedMime, receiptSchema);
       const parsedData = JSON.parse(textResult);
       return res.json({ success: true, data: parsedData });
     } catch (err: any) {

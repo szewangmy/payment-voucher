@@ -1,4 +1,4 @@
-export type UserRole = 'staff' | 'accounts' | 'admin';
+export type UserRole = 'staff' | 'manager' | 'accounts' | 'admin';
 
 export interface CompanyEntity {
   id: string;
