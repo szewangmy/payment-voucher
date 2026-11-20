@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, ClaimVoucher, UserRole } from './types';
 import { COMPANIES, USERS, INITIAL_CLAIMS } from './data/mockData';
-import { auth, db } from './firebase';
+import { auth, db, CLAIMS_COLLECTION } from './firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { collection, getDocs, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, query, where, onSnapshot } from 'firebase/firestore';
 
@@ -96,7 +96,7 @@ export default function App() {
       return;
     }
 
-    const unsubClaims = onSnapshot(collection(db, 'claims'), (snapshot) => {
+    const unsubClaims = onSnapshot(collection(db, CLAIMS_COLLECTION), (snapshot) => {
       const list: ClaimVoucher[] = [];
       snapshot.forEach((docSnap) => {
         const claim = { id: docSnap.id, ...docSnap.data() } as ClaimVoucher;
@@ -210,6 +210,7 @@ export default function App() {
           currentUser={currentUser}
           onClose={() => setIsSubmitModalOpen(false)}
           onAddClaim={handleAddClaim}
+          onClaimSubmitted={() => setSelectedEntityFilter('all')}
         />
       )}
 

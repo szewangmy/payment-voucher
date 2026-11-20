@@ -6,6 +6,8 @@ import {
   Filter, Building2, Printer, Eye, Trash2, ArrowUpRight, FileSpreadsheet,
   Check, AlertCircle
 } from 'lucide-react';
+import { db, CLAIMS_COLLECTION } from '../firebase';
+import { deleteDoc, doc } from 'firebase/firestore';
 
 interface DashboardProps {
   claims: ClaimVoucher[];
@@ -30,6 +32,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
 }) => {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [bannerMsg, setBannerMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Filtered claims
   const filteredClaims = useMemo(() => {
@@ -74,6 +78,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+      
+      {bannerMsg && (
+        <div className={`p-4 rounded-xl text-sm flex items-center space-x-2 border ${
+          bannerMsg.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-rose-50 border-rose-200 text-rose-900'
+        }`}>
+          {bannerMsg.type === 'success' ? <Check className="w-5 h-5 text-emerald-600 shrink-0" /> : <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />}
+          <span className="font-semibold">{bannerMsg.text}</span>
+        </div>
+      )}
       
       {/* Welcome & Quick Stats */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -269,13 +282,49 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           <span>{currentUser.role === 'admin' ? 'Process / Voucher' : 'View Voucher'}</span>
                         </button>
                         {currentUser.role === 'admin' && (
-                          <button
-                            onClick={() => onDeleteClaim(claim.id)}
-                            className="text-slate-400 hover:text-rose-600 p-1.5 transition"
-                            title="Delete Claim"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                          <div className="inline-flex items-center space-x-1.5 ml-2">
+                            {confirmDeleteId === claim.id ? (
+                              <div className="flex items-center space-x-1.5" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    try {
+                                      await deleteDoc(doc(db, CLAIMS_COLLECTION, claim.id));
+                                      setBannerMsg({ type: 'success', text: 'Claim deleted successfully.' });
+                                      setConfirmDeleteId(null);
+                                      setTimeout(() => setBannerMsg(null), 4000);
+                                    } catch (err: any) {
+                                      setBannerMsg({ type: 'error', text: `Failed to delete claim: ${err.message || err}` });
+                                      setConfirmDeleteId(null);
+                                      setTimeout(() => setBannerMsg(null), 5000);
+                                    }
+                                  }}
+                                  className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded text-[11px] font-semibold transition shadow-2xs"
+                                >
+                                  Confirm Delete
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteId(null)}
+                                  className="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-[11px] font-semibold transition"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setConfirmDeleteId(claim.id);
+                                }}
+                                className="text-slate-400 hover:text-rose-600 p-1.5 transition"
+                                title="Delete Claim"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
                         )}
                       </td>
                     </tr>

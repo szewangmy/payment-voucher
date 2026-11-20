@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, ClaimVoucher, ExpenseItem } from '../types';
 import { COMPANIES, GL_ACCOUNTS } from '../data/mockData';
-import { db } from '../firebase';
+import { db, CLAIMS_COLLECTION } from '../firebase';
 import { doc, getDoc, onSnapshot, collection, addDoc } from 'firebase/firestore';
 import { GoogleGenAI, Schema, Type } from '@google/genai';
 import * as pdfjsLib from 'pdfjs-dist';
@@ -17,6 +17,7 @@ interface ClaimSubmitModalProps {
   currentUser: UserProfile;
   onClose: () => void;
   onAddClaim: (newClaim: ClaimVoucher) => void;
+  onClaimSubmitted?: () => void;
 }
 
 interface UploadQueueItem {
@@ -31,7 +32,8 @@ interface UploadQueueItem {
 export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
   currentUser,
   onClose,
-  onAddClaim
+  onAddClaim,
+  onClaimSubmitted
 }) => {
   const [selectedCompanyId, setSelectedCompanyId] = useState<string>(currentUser.defaultCompanyId);
   const [payTo, setPayTo] = useState<string>(currentUser.name);
@@ -543,14 +545,15 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
         bankAccountCode,
         chequeNo: paymentMethod === 'cheque' ? chequeNo : undefined,
         totalAmountRM: totalAmount,
-        createdAt: new Date().toISOString().split('T')[0],
+        createdAt: new Date().toISOString(),
         items
       };
 
       const sanitized = sanitizeForFirestore(newClaim);
-      await addDoc(collection(db, 'claims'), sanitized);
+      await addDoc(collection(db, CLAIMS_COLLECTION), sanitized);
       setSuccessMsg('Claim submitted successfully to Firestore!');
       onAddClaim(newClaim);
+      if (onClaimSubmitted) onClaimSubmitted();
       setTimeout(() => {
         onClose();
       }, 1200);
