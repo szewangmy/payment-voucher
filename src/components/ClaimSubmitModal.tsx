@@ -25,7 +25,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [ocrStatusText, setOcrStatusText] = useState<string>('Gemini AI OCR is reading your receipt(s)...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [lastUploadedImage, setLastUploadedImage] = useState<{ base64: string; mimeType: string } | null>(null);
+  const [lastUploadedFile, setLastUploadedFile] = useState<{ base64: string; mimeType: string } | null>(null);
 
   // Handle Receipt Upload & AI OCR via backend proxy
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -35,8 +35,10 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const base64Data = await fileToBase64(file);
-      setLastUploadedImage({ base64: base64Data, mimeType: file.type });
-      await processImageWithOCR(base64Data, file.type);
+      const mimeType = file.type || 'image/jpeg';
+
+      setLastUploadedFile({ base64: base64Data, mimeType });
+      await processImageWithOCR(base64Data, mimeType);
     }
     // reset file input
     e.target.value = '';
@@ -50,69 +52,81 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     let attempt = 1;
     const maxAttempts = 3;
 
-    while (attempt <= maxAttempts) {
-      try {
-        if (attempt > 1) {
-          setOcrStatusText(`AI server is busy—retrying automatically (Attempt ${attempt}/3)...`);
-        }
+    try {
+      while (attempt <= maxAttempts) {
+        try {
+          if (attempt > 1) {
+            setOcrStatusText(`AI server is busy—retrying automatically (Attempt ${attempt}/3)...`);
+          }
 
-        const res = await fetch('/api/ocr', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: base64Data, mimeType })
-        });
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
 
-        const json = await res.json();
-        if (!json.success) {
-          throw new Error(json.error || 'Gemini OCR extraction failed');
-        }
+          const res = await fetch('/api/ocr', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: base64Data, mimeType }),
+            signal: controller.signal
+          });
 
-        const extracted = json.data;
-        const defaultGL = GL_ACCOUNTS[0];
+          clearTimeout(timeoutId);
 
-        // Find matching GL account if possible
-        const matchedGL = GL_ACCOUNTS.find(g => 
-          extracted.suggested_account_category?.toLowerCase().includes(g.name.toLowerCase()) ||
-          extracted.suggested_account_category?.toLowerCase().includes(g.code.toLowerCase())
-        ) || defaultGL;
+          const json = await res.json();
+          if (!json.success) {
+            throw new Error(json.error || 'Gemini OCR extraction failed');
+          }
 
-        const newItem: ExpenseItem = {
-          lineNo: items.length + 1,
-          date: extracted.receipt_date || voucherDate,
-          merchant: extracted.merchant_name || 'Unknown Merchant',
-          receiptNo: extracted.receipt_or_invoice_no || `RCP-${Math.floor(1000 + Math.random() * 9000)}`,
-          particulars: extracted.description_summary || 'General Office Expense',
-          accountCode: matchedGL.code,
-          accountName: matchedGL.name,
-          taxCode: extracted.tax_amount_rm > 0 ? 'SV' : 'NR',
-          taxAmountRM: extracted.tax_amount_rm || 0,
-          netAmountRM: (extracted.total_amount_rm || 0) - (extracted.tax_amount_rm || 0),
-          amountRM: extracted.total_amount_rm || 0,
-          receiptImageUrl: base64Data
-        };
+          const extracted = json.data;
+          const defaultGL = GL_ACCOUNTS[0];
 
-        setItems(prev => [...prev, newItem]);
-        setIsAnalyzing(false);
-        setErrorMsg(null);
-        return;
-      } catch (err: any) {
-        console.warn(`OCR attempt ${attempt} failed:`, err);
-        if (attempt < maxAttempts) {
-          attempt++;
-          // wait before retry
-          await new Promise(r => setTimeout(r, 2000));
-        } else {
-          setIsAnalyzing(false);
-          setErrorMsg('Gemini OCR is temporarily busy due to high traffic. You can click Retry Scan or enter the item manually below.');
+          // Find matching GL account if possible
+          const matchedGL = GL_ACCOUNTS.find(g => 
+            extracted.suggested_account_category?.toLowerCase().includes(g.name.toLowerCase()) ||
+            extracted.suggested_account_category?.toLowerCase().includes(g.code.toLowerCase())
+          ) || defaultGL;
+
+          const newItem: ExpenseItem = {
+            lineNo: items.length + 1,
+            date: extracted.receipt_date || voucherDate,
+            merchant: extracted.merchant_name || 'Unknown Merchant',
+            receiptNo: extracted.receipt_or_invoice_no || `RCP-${Math.floor(1000 + Math.random() * 9000)}`,
+            particulars: extracted.description_summary || 'General Office Expense',
+            accountCode: matchedGL.code,
+            accountName: matchedGL.name,
+            taxCode: extracted.tax_amount_rm > 0 ? 'SV' : 'NR',
+            taxAmountRM: extracted.tax_amount_rm || 0,
+            netAmountRM: (extracted.total_amount_rm || 0) - (extracted.tax_amount_rm || 0),
+            amountRM: extracted.total_amount_rm || 0,
+            receiptImageUrl: mimeType === 'application/pdf' ? 'https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?auto=format&fit=crop&w=800&q=80' : base64Data
+          };
+
+          setItems(prev => [...prev, newItem]);
+          setErrorMsg(null);
           return;
+        } catch (err: any) {
+          console.warn(`OCR attempt ${attempt} failed:`, err);
+          if (err.name === 'AbortError') {
+            throw new Error('OCR request timed out after 25 seconds.');
+          }
+          if (attempt < maxAttempts) {
+            attempt++;
+            await new Promise(r => setTimeout(r, 2000));
+          } else {
+            throw err;
+          }
         }
       }
+    } catch (err: any) {
+      console.error('OCR Process Error:', err);
+      setErrorMsg('Gemini OCR is temporarily busy due to high traffic. You can click Retry Scan or enter the item manually below.');
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
   const handleRetryScan = () => {
-    if (lastUploadedImage) {
-      processImageWithOCR(lastUploadedImage.base64, lastUploadedImage.mimeType);
+    if (lastUploadedFile) {
+      processImageWithOCR(lastUploadedFile.base64, lastUploadedFile.mimeType);
     }
   };
 
@@ -221,7 +235,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
                 <AlertCircle className="w-5 h-5 shrink-0 text-amber-600" />
                 <span>{errorMsg}</span>
               </div>
-              {lastUploadedImage && (
+              {lastUploadedFile && (
                 <button
                   type="button"
                   onClick={handleRetryScan}

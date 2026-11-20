@@ -17,7 +17,11 @@ async function callGeminiWithRetry(ai: GoogleGenAI, base64Data: string, detected
   for (const model of models) {
     for (let attempt = 1; attempt <= maxRetriesPerModel; attempt++) {
       try {
-        const response = await ai.models.generateContent({
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('OCR request timed out after 15 seconds')), 15000)
+        );
+
+        const apiCall = ai.models.generateContent({
           model,
           contents: [
             {
@@ -34,9 +38,11 @@ async function callGeminiWithRetry(ai: GoogleGenAI, base64Data: string, detected
             responseMimeType: 'application/json',
             responseSchema: receiptSchema,
             temperature: 0.1,
-            thinkingConfig: { thinkingBudget: 0 } as any
+            thinkingConfig: { thinkingLevel: 'LOW' } as any
           }
         });
+
+        const response: any = await Promise.race([apiCall, timeoutPromise]);
 
         if (response.text) {
           return response.text;
@@ -48,7 +54,8 @@ async function callGeminiWithRetry(ai: GoogleGenAI, base64Data: string, detected
           errStr.includes('429') || 
           errStr.includes('UNAVAILABLE') || 
           errStr.includes('Resource exhausted') ||
-          errStr.includes('overloaded');
+          errStr.includes('overloaded') ||
+          errStr.includes('timed out');
         
         console.warn(`OCR attempt ${attempt} for model ${model} failed: ${errStr}`);
 
@@ -74,7 +81,8 @@ async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-  app.use(express.json({ limit: '50mb' }));
+  app.use(express.json({ limit: '25mb' }));
+  app.use(express.urlencoded({ limit: '25mb', extended: true }));
 
   // Initialize Gemini AI SDK
   const apiKey = process.env.GEMINI_API_KEY;
