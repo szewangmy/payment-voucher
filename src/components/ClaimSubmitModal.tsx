@@ -85,12 +85,12 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
     const unsubscribe = onSnapshot(doc(db, SYSTEM_SETTINGS_COLLECTION, GEMINI_CONFIG_DOC), async (docSnap) => {
       if (docSnap.exists() && docSnap.data().apiKey) {
         const key = docSnap.data().apiKey;
-        setGeminiStatus({ connected: true, model: turboMode ? 'gemini-3.5-flash-lite (Turbo)' : 'gemini-3.8-flash (Deep)', keySource: 'Shared Company Key' });
+        setGeminiStatus({ connected: true, model: turboMode ? 'gemini-2.5-flash-lite (Turbo)' : 'gemini-2.5-flash (Deep)', keySource: 'Shared Company Key' });
         setActiveApiKey(key);
       } else {
         const hasServerKey = await checkServerStatus();
         if (!hasServerKey) {
-          setGeminiStatus({ connected: false, model: 'gemini-3.5-flash-lite' });
+          setGeminiStatus({ connected: false, model: 'gemini-2.5-flash-lite' });
           setActiveApiKey(null);
         }
       }
@@ -334,7 +334,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
           if (activeApiKey && activeApiKey !== 'backend') {
             try {
               const ai = new GoogleGenAI({ apiKey: activeApiKey });
-              const modelToUse = turboMode ? 'gemini-3.5-flash-lite' : 'gemini-3.8-flash';
+              const modelToUse = turboMode ? 'gemini-2.5-flash-lite' : 'gemini-2.5-flash';
               const response = await ai.models.generateContent({
                 model: modelToUse,
                 contents: [

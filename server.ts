@@ -13,8 +13,8 @@ let inMemorySharedApiKey = '';
 async function callGeminiWithTurboRetry(apiKey: string, base64Data: string, detectedMime: string, receiptSchema: Schema, turboMode: boolean) {
   const ai = new GoogleGenAI({ apiKey });
   const models = turboMode 
-    ? ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-3.7-flash']
-    : ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.7-flash'];
+    ? ['gemini-2.5-flash-lite', 'gemini-2.5-flash']
+    : ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
   
   const maxRetriesPerModel = 1; // Fast failover within 6s
 
@@ -41,7 +41,7 @@ async function callGeminiWithTurboRetry(apiKey: string, base64Data: string, dete
           config: {
             responseMimeType: 'application/json',
             responseSchema: receiptSchema,
-            thinkingConfig: { thinkingLevel: model === 'gemini-3.5-flash-lite' ? 'MINIMAL' : 'LOW' } as any
+            thinkingConfig: { thinkingLevel: model === 'gemini-2.5-flash-lite' ? 'MINIMAL' : 'LOW' } as any
           }
         });
 
@@ -85,7 +85,7 @@ async function startServer() {
     const apiKey = headerKey || inMemorySharedApiKey || envKey;
     const connected = Boolean(apiKey && apiKey.length > 5);
     const keySource = headerKey ? 'HEADER_KEY' : inMemorySharedApiKey ? 'FIRESTORE_IN_MEMORY_CACHE' : process.env.GEMINI_API_KEY ? 'GEMINI_API_KEY' : process.env.API_KEY ? 'API_KEY' : process.env.VITE_GEMINI_API_KEY ? 'VITE_GEMINI_API_KEY' : 'NONE';
-    return res.json({ connected, keySource, model: 'gemini-3.5-flash-lite (Turbo)' });
+    return res.json({ connected, keySource, model: 'gemini-2.5-flash-lite (Turbo)' });
   });
 
   app.post('/api/ocr', async (req, res) => {
