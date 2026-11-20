@@ -194,7 +194,11 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const itemId = `file-${Date.now()}-${i}`;
+      const fileSig = `${file.name}-${file.size}-${file.lastModified}`;
+      if (uploadQueue.some(q => q.id.includes(fileSig) || q.fileName.startsWith(file.name))) {
+        continue;
+      }
+      const itemId = `file-${Date.now()}-${i}-${fileSig.replace(/[^a-zA-Z0-9]/g, '')}`;
       const mimeType = file.type || 'image/jpeg';
 
       if (mimeType === 'application/pdf') {
@@ -301,7 +305,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
           }
 
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s timeout for turbo
+          const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
 
           const res = await fetch('/api/ocr', {
             method: 'POST',
@@ -316,30 +320,42 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
             const json = await res.json();
             if (json.success) {
               extractedData = json.data;
+            } else {
+              throw new Error(json.error || 'Server OCR error');
             }
+          } else {
+            const errBody = await res.json().catch(() => ({}));
+            throw new Error(errBody.error || `HTTP error ${res.status}`);
           }
-        } catch (netErr) {
-          console.warn('Backend /api/ocr call failed, trying client SDK fallback:', netErr);
-        }
-
-        // Client SDK fallback if backend failed
-        if (!extractedData && activeApiKey && activeApiKey !== 'backend') {
-          const ai = new GoogleGenAI({ apiKey: activeApiKey });
-          const modelToUse = turboMode ? 'gemini-3.5-flash-lite' : 'gemini-3.8-flash';
-          const response = await ai.models.generateContent({
-            model: modelToUse,
-            contents: [
-              { inlineData: { data: cleanBase64, mimeType: cleanMime } },
-              { text: "Analyze Malaysian receipt. Return strict JSON: merchantName, merchantRegNo, documentType, receiptNumber, transactionDate (DD/MM/YYYY), lineItems (description, quantity, unitPrice, amount, suggestedGlCode), subtotal, sstTaxAmount, rounding, totalAmount, analysisNotes." }
-            ],
-            config: {
-              responseMimeType: 'application/json',
-              responseSchema: receiptSchema,
-              thinkingConfig: { thinkingLevel: 'LOW' } as any
+        } catch (netErr: any) {
+          console.warn('Backend /api/ocr call failed, trying direct browser client fallback:', netErr);
+          
+          // Direct client fallback using activeApiKey
+          if (activeApiKey && activeApiKey !== 'backend') {
+            try {
+              const ai = new GoogleGenAI({ apiKey: activeApiKey });
+              const modelToUse = turboMode ? 'gemini-3.5-flash-lite' : 'gemini-3.8-flash';
+              const response = await ai.models.generateContent({
+                model: modelToUse,
+                contents: [
+                  { inlineData: { data: cleanBase64, mimeType: cleanMime } },
+                  { text: "Analyze Malaysian receipt. Return strict JSON: merchantName, merchantRegNo, documentType, receiptNumber, transactionDate (DD/MM/YYYY), lineItems (description, quantity, unitPrice, amount, suggestedGlCode), subtotal, sstTaxAmount, rounding, totalAmount, analysisNotes, isDateAuthentic (boolean), dateAuditFlag (string)." }
+                ],
+                config: {
+                  responseMimeType: 'application/json',
+                  responseSchema: receiptSchema,
+                  thinkingConfig: { thinkingLevel: 'MINIMAL' } as any
+                }
+              });
+              if (response.text) {
+                extractedData = JSON.parse(response.text);
+              }
+            } catch (clientErr: any) {
+              console.error('Client SDK fallback error:', clientErr);
+              throw new Error(clientErr.message || netErr.message || 'OCR extraction failed');
             }
-          });
-          if (response.text) {
-            extractedData = JSON.parse(response.text);
+          } else {
+            throw new Error(netErr.message || 'OCR extraction failed (Missing active API key)');
           }
         }
 
@@ -782,11 +798,13 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
                       )}
                       {item.status === 'error' && (
                         <div className="flex items-center space-x-2">
-                          <span className="text-rose-600 font-medium">Error</span>
+                          <span className="text-rose-600 font-medium truncate max-w-xs" title={item.errorText}>
+                            Error: {item.errorText || 'Unknown error'}
+                          </span>
                           <button
                             type="button"
                             onClick={() => handleRetryItem(item)}
-                            className="px-2 py-1 bg-amber-600 text-white rounded text-[10px] font-semibold"
+                            className="px-2 py-1 bg-amber-600 text-white rounded text-[10px] font-semibold shrink-0"
                           >
                             Retry
                           </button>

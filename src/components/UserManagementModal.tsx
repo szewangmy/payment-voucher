@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile } from '../types';
 import { COMPANIES } from '../data/mockData';
-import { db } from '../firebase';
+import { db, CLAIMS_COLLECTION } from '../firebase';
 import { collection, getDocs, doc, updateDoc, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
 import { Shield, Users, Check, X, Building2, UserCheck, Key, Save, Sparkles, AlertCircle } from 'lucide-react';
 
@@ -31,6 +31,43 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
   const [confirmDeleteText, setConfirmDeleteText] = useState<string>('');
   const [isPurgingMock, setIsPurgingMock] = useState<boolean>(false);
   const [isClearingEntityClaims, setIsClearingEntityClaims] = useState<boolean>(false);
+  const [isVerifyingConfig, setIsVerifyingConfig] = useState<boolean>(false);
+  const [verifyStatus, setVerifyStatus] = useState<{ success: boolean; text: string } | null>(null);
+
+  const handleVerifyAndSyncConfig = async () => {
+    setIsVerifyingConfig(true);
+    setVerifyStatus(null);
+    try {
+      const res = await fetch('/api/gemini/status');
+      const data = await res.json();
+      if (!data.connected && !sharedApiKey) {
+        throw new Error('No Gemini API key configured in backend or Firestore.');
+      }
+
+      if (sharedApiKey) {
+        await setDoc(doc(db, SYSTEM_SETTINGS_COLLECTION, GEMINI_CONFIG_DOC), {
+          apiKey: sharedApiKey.trim(),
+          updatedBy: currentUser.email || currentUser.name,
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+
+        await fetch('/api/gemini/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey: sharedApiKey.trim() })
+        });
+      }
+
+      await getDocs(collection(db, CLAIMS_COLLECTION));
+
+      setVerifyStatus({ success: true, text: 'System configuration verified & synced successfully! Firestore claims access confirmed.' });
+    } catch (err: any) {
+      console.error('Config verification failed:', err);
+      setVerifyStatus({ success: false, text: `Verification failed: ${err.message || err}` });
+    } finally {
+      setIsVerifyingConfig(false);
+    }
+  };
 
   useEffect(() => {
     fetchUsers();
@@ -460,6 +497,32 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
                     {isClearingEntityClaims ? 'Clearing...' : 'Clear Claims'}
                   </button>
                 </div>
+              </div>
+            </div>
+
+            {/* 4. Verify & Sync System Configuration */}
+            <div className="bg-white p-4 rounded-xl border border-rose-200 space-y-3">
+              <div>
+                <span className="font-bold text-slate-900 text-xs block">Verify & Sync System Configuration</span>
+                <span className="text-[11px] text-slate-600">Test Gemini API key connectivity, re-sync to server cache, and confirm Firestore write permissions.</span>
+              </div>
+
+              <div className="flex items-center space-x-3">
+                <button
+                  type="button"
+                  onClick={handleVerifyAndSyncConfig}
+                  disabled={isVerifyingConfig}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold shadow-2xs transition disabled:opacity-50"
+                >
+                  {isVerifyingConfig ? 'Verifying...' : 'Verify & Sync Configuration'}
+                </button>
+                {verifyStatus && (
+                  <span className={`text-xs font-semibold px-2.5 py-1 rounded ${
+                    verifyStatus.success ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                  }`}>
+                    {verifyStatus.text}
+                  </span>
+                )}
               </div>
             </div>
           </div>

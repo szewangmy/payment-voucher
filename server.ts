@@ -22,7 +22,7 @@ async function callGeminiWithTurboRetry(apiKey: string, base64Data: string, dete
     for (let attempt = 1; attempt <= maxRetriesPerModel; attempt++) {
       try {
         const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('OCR request timed out after 6 seconds')), 6000)
+          setTimeout(() => reject(new Error('OCR request timed out after 15 seconds')), 15000)
         );
 
         const apiCall = ai.models.generateContent({
@@ -41,7 +41,7 @@ async function callGeminiWithTurboRetry(apiKey: string, base64Data: string, dete
           config: {
             responseMimeType: 'application/json',
             responseSchema: receiptSchema,
-            thinkingConfig: { thinkingLevel: 'LOW' } as any
+            thinkingConfig: { thinkingLevel: model === 'gemini-3.5-flash-lite' ? 'MINIMAL' : 'LOW' } as any
           }
         });
 
