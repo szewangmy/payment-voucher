@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, ClaimVoucher, UserRole } from './types';
-import { COMPANIES, USERS, INITIAL_CLAIMS } from './data/mockData';
+import { COMPANIES, USERS } from './data/mockData';
 import { auth, db, CLAIMS_COLLECTION } from './firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { collection, getDocs, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, query, where, onSnapshot } from 'firebase/firestore';
@@ -142,15 +142,13 @@ export default function App() {
   };
 
   const handleDeleteClaim = async (claimId: string) => {
-    if (window.confirm('Are you sure you want to delete this claim voucher from Firestore?')) {
-      try {
-        await deleteDoc(doc(db, 'claims', claimId));
-        setClaims(prev => prev.filter(c => c.id !== claimId));
-        if (selectedClaim?.id === claimId) setSelectedClaim(null);
-      } catch (err: any) {
-        console.error('Error deleting claim:', err);
-        alert(`Failed to delete claim from Firestore: ${err.message || err}`);
-      }
+    try {
+      setClaims(prev => prev.filter(c => c.id !== claimId));
+      if (selectedClaim?.id === claimId) setSelectedClaim(null);
+      await deleteDoc(doc(db, CLAIMS_COLLECTION, claimId));
+    } catch (err: any) {
+      console.error('Error deleting claim:', err);
+      throw err;
     }
   };
 

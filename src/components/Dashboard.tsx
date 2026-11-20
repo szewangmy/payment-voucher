@@ -287,9 +287,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
                               <div className="flex items-center space-x-1.5" onClick={(e) => e.stopPropagation()}>
                                 <button
                                   type="button"
-                                  onClick={async () => {
+                                  onClick={async (e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
                                     try {
-                                      await deleteDoc(doc(db, CLAIMS_COLLECTION, claim.id));
+                                      await onDeleteClaim(claim.id);
                                       setBannerMsg({ type: 'success', text: 'Claim deleted successfully.' });
                                       setConfirmDeleteId(null);
                                       setTimeout(() => setBannerMsg(null), 4000);
@@ -305,7 +307,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => setConfirmDeleteId(null)}
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setConfirmDeleteId(null);
+                                  }}
                                   className="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-[11px] font-semibold transition"
                                 >
                                   Cancel
@@ -315,6 +321,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                               <button
                                 type="button"
                                 onClick={(e) => {
+                                  e.preventDefault();
                                   e.stopPropagation();
                                   setConfirmDeleteId(claim.id);
                                 }}
