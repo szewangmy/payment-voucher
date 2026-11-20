@@ -10,9 +10,15 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-async function callGeminiWithRetry(ai: GoogleGenAI, base64Data: string, detectedMime: string, receiptSchema: Schema) {
-  const models = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.1-pro'];
-  const maxRetriesPerModel = 3;
+async function callGeminiWithCrossModelRetry(base64Data: string, detectedMime: string, receiptSchema: Schema) {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+  if (!apiKey) {
+    throw new Error('MISSING_API_KEY');
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+  const models = ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-4-hydrogen'];
+  const maxRetriesPerModel = 2;
 
   for (const model of models) {
     for (let attempt = 1; attempt <= maxRetriesPerModel; attempt++) {
@@ -59,21 +65,18 @@ async function callGeminiWithRetry(ai: GoogleGenAI, base64Data: string, detected
         console.warn(`OCR attempt ${attempt} for model ${model} failed: ${errStr}`);
 
         if (isRateLimitOrUnavailable && attempt < maxRetriesPerModel) {
-          // Exponential backoff: 1.5s, 3s, 6s + random jitter
           const delay = Math.pow(2, attempt - 1) * 1500 + Math.random() * 500;
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         } else if (attempt === maxRetriesPerModel) {
-          // Exhausted retries for this model, move to next model fallback
           break;
         } else if (!isRateLimitOrUnavailable) {
-          // Non-retryable client/auth error
           throw err;
         }
       }
     }
   }
-  throw new Error('Gemini OCR is temporarily busy due to high traffic. You can click Retry Scan or enter the item manually below.');
+  throw new Error('HTTP 503 / 429: Gemini OCR is temporarily busy due to high traffic.');
 }
 
 async function startServer() {
@@ -84,26 +87,28 @@ async function startServer() {
   app.use(express.json({ limit: '25mb' }));
   app.use(express.urlencoded({ limit: '25mb', extended: true }));
 
-  // Initialize Gemini AI SDK strictly on backend
-  const apiKey = process.env.GEMINI_API_KEY;
-  const ai = new GoogleGenAI({ apiKey: apiKey || '' });
-
-  // Gemini Connection Status Endpoint
+  // Gemini Connection Status Endpoint supporting both GEMINI_API_KEY and API_KEY
   app.get('/api/gemini/status', (req, res) => {
-    const connected = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.length > 5);
-    return res.json({ connected, model: 'gemini-3.8-flash' });
+    const key = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    const connected = Boolean(key && key.length > 5);
+    const keySource = process.env.GEMINI_API_KEY ? 'GEMINI_API_KEY' : process.env.API_KEY ? 'API_KEY' : 'NONE';
+    return res.json({ connected, keySource, model: 'gemini-3.8-flash' });
   });
 
   // OCR API Endpoint for Receipts / Invoices
   app.post('/api/ocr', async (req, res) => {
     try {
+      const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+      if (!apiKey) {
+        return res.status(500).json({ 
+          success: false, 
+          error: 'MISSING_API_KEY' 
+        });
+      }
+
       const { image, mimeType } = req.body;
       if (!image) {
         return res.status(400).json({ success: false, error: 'No image provided for OCR' });
-      }
-
-      if (!apiKey) {
-        return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured in environment variables.' });
       }
 
       // Strip data URI prefix if present and extract clean base64 data & mimeType
@@ -149,14 +154,16 @@ async function startServer() {
         required: ["merchantName", "transactionDate", "totalAmount", "lineItems"]
       };
 
-      const textResult = await callGeminiWithRetry(ai, base64Data, detectedMime, receiptSchema);
+      const textResult = await callGeminiWithCrossModelRetry(base64Data, detectedMime, receiptSchema);
       const parsedData = JSON.parse(textResult);
       return res.json({ success: true, data: parsedData });
     } catch (err: any) {
       console.error('OCR Error:', err);
-      return res.status(500).json({ 
+      const errorMsg = err.message || '';
+      const statusCode = errorMsg === 'MISSING_API_KEY' ? 500 : 503;
+      return res.status(statusCode).json({ 
         success: false, 
-        error: err.message || 'Gemini OCR is temporarily busy due to high traffic. You can click Retry Scan or enter the item manually below.' 
+        error: errorMsg 
       });
     }
   });

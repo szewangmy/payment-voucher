@@ -245,7 +245,16 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
       }
     } catch (err: any) {
       console.error('OCR Process Error:', err);
-      setErrorMsg('Gemini OCR is temporarily busy due to high traffic. You can click Retry Scan or enter the item manually below.');
+      const msg = String(err?.message || err);
+      if (msg.includes('MISSING_API_KEY') || msg.includes('500')) {
+        setErrorMsg('Server Gemini API key is not configured for this deployment environment. Please add GEMINI_API_KEY in Cloud Run / AI Studio Secrets.');
+      } else if (msg.includes('404') || msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
+        setErrorMsg('Backend OCR server (/api/ocr) is unreachable. Please access the app via the full-stack Cloud Run URL.');
+      } else if (msg.includes('503') || msg.includes('429') || msg.includes('busy') || msg.includes('timed out')) {
+        setErrorMsg('Gemini OCR is temporarily busy due to high traffic. You can click Retry Scan or enter the item manually below.');
+      } else {
+        setErrorMsg(`OCR Error: ${msg}`);
+      }
     } finally {
       setIsAnalyzing(false);
     }
