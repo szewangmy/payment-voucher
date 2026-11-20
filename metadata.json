@@ -2,5 +2,7 @@
   "name": "Multi-Entity Staff Claim & Payment Voucher System",
   "description": "Enterprise staff expense claim and payment voucher management system with Gemini OCR, multi-entity routing, A4 payment vouchers, and SQL/AutoCount CSV export.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

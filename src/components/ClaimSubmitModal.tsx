@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { UserProfile, ClaimVoucher, ExpenseItem } from '../types';
 import { COMPANIES, GL_ACCOUNTS } from '../data/mockData';
-import { Upload, Sparkles, X, Plus, Trash2, Check, AlertCircle, Loader2 } from 'lucide-react';
+import { Upload, Sparkles, X, Plus, Trash2, Check, AlertCircle, Loader2, RotateCw } from 'lucide-react';
 
 interface ClaimSubmitModalProps {
   currentUser: UserProfile;
@@ -23,26 +23,43 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
   
   const [items, setItems] = useState<ExpenseItem[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  const [ocrStatusText, setOcrStatusText] = useState<string>('Gemini AI OCR is reading your receipt(s)...');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [lastUploadedImage, setLastUploadedImage] = useState<{ base64: string; mimeType: string } | null>(null);
 
   // Handle Receipt Upload & AI OCR via backend proxy
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const base64Data = await fileToBase64(file);
+      setLastUploadedImage({ base64: base64Data, mimeType: file.type });
+      await processImageWithOCR(base64Data, file.type);
+    }
+    // reset file input
+    e.target.value = '';
+  };
+
+  const processImageWithOCR = async (base64Data: string, mimeType: string) => {
     setIsAnalyzing(true);
     setErrorMsg(null);
+    setOcrStatusText('Gemini AI OCR is reading your receipt(s)...');
 
-    try {
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const base64Data = await fileToBase64(file);
-        
-        // Call backend OCR endpoint
+    let attempt = 1;
+    const maxAttempts = 3;
+
+    while (attempt <= maxAttempts) {
+      try {
+        if (attempt > 1) {
+          setOcrStatusText(`AI server is busy—retrying automatically (Attempt ${attempt}/3)...`);
+        }
+
         const res = await fetch('/api/ocr', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: base64Data, mimeType: file.type })
+          body: JSON.stringify({ image: base64Data, mimeType })
         });
 
         const json = await res.json();
@@ -60,7 +77,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
         ) || defaultGL;
 
         const newItem: ExpenseItem = {
-          lineNo: items.length + i + 1,
+          lineNo: items.length + 1,
           date: extracted.receipt_date || voucherDate,
           merchant: extracted.merchant_name || 'Unknown Merchant',
           receiptNo: extracted.receipt_or_invoice_no || `RCP-${Math.floor(1000 + Math.random() * 9000)}`,
@@ -75,14 +92,27 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
         };
 
         setItems(prev => [...prev, newItem]);
+        setIsAnalyzing(false);
+        setErrorMsg(null);
+        return;
+      } catch (err: any) {
+        console.warn(`OCR attempt ${attempt} failed:`, err);
+        if (attempt < maxAttempts) {
+          attempt++;
+          // wait before retry
+          await new Promise(r => setTimeout(r, 2000));
+        } else {
+          setIsAnalyzing(false);
+          setErrorMsg('Gemini OCR is temporarily busy due to high traffic. You can click Retry Scan or enter the item manually below.');
+          return;
+        }
       }
-    } catch (err: any) {
-      console.error(err);
-      setErrorMsg(err.message || 'Failed to process receipt with Gemini OCR.');
-    } finally {
-      setIsAnalyzing(false);
-      // reset file input
-      e.target.value = '';
+    }
+  };
+
+  const handleRetryScan = () => {
+    if (lastUploadedImage) {
+      processImageWithOCR(lastUploadedImage.base64, lastUploadedImage.mimeType);
     }
   };
 
@@ -149,7 +179,9 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
       id: `CLM-2026-${Date.now().toString().slice(-4)}`,
       voucherNo,
       companyId: selectedCompanyId,
+      companyEntityId: selectedCompanyId,
       claimantId: currentUser.id,
+      createdByUid: currentUser.uid,
       payTo,
       voucherDate,
       status: 'pending',
@@ -184,9 +216,22 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
         <form onSubmit={handleSubmit} className="p-6 overflow-y-auto space-y-6 flex-1">
           
           {errorMsg && (
-            <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-lg text-sm flex items-center space-x-2">
-              <AlertCircle className="w-5 h-5 shrink-0" />
-              <span>{errorMsg}</span>
+            <div className="p-4 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-sm">
+              <div className="flex items-center space-x-2">
+                <AlertCircle className="w-5 h-5 shrink-0 text-amber-600" />
+                <span>{errorMsg}</span>
+              </div>
+              {lastUploadedImage && (
+                <button
+                  type="button"
+                  onClick={handleRetryScan}
+                  disabled={isAnalyzing}
+                  className="inline-flex items-center space-x-1.5 bg-amber-600 hover:bg-amber-500 text-white px-3 py-1.5 rounded-lg text-xs font-semibold shadow-2xs transition shrink-0"
+                >
+                  <RotateCw className="w-3.5 h-3.5" />
+                  <span>Retry Scan</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -282,7 +327,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
               {isAnalyzing ? (
                 <>
                   <Loader2 className="w-8 h-8 text-emerald-600 animate-spin" />
-                  <p className="text-sm font-bold text-emerald-900">Gemini AI OCR is reading your receipt(s)...</p>
+                  <p className="text-sm font-bold text-emerald-900">{ocrStatusText}</p>
                   <p className="text-xs text-emerald-700">Extracting merchant, date, invoice number & amounts automatically</p>
                 </>
               ) : (
@@ -291,7 +336,7 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
                     <Upload className="w-6 h-6" />
                   </div>
                   <p className="text-sm font-bold text-slate-800">Drop receipt / invoice images here, or click to upload</p>
-                  <p className="text-xs text-slate-500">Supports JPG, PNG, WebP & PDF. Gemini 2.5 Flash OCR will auto-fill particulars.</p>
+                  <p className="text-xs text-slate-500">Supports JPG, PNG, WebP & PDF. Gemini 3.8 Flash OCR will auto-fill particulars.</p>
                 </>
               )}
             </div>

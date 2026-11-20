@@ -1,30 +1,41 @@
-import React from 'react';
-import { UserProfile, CompanyEntity } from '../types';
-import { COMPANIES, USERS } from '../data/mockData';
-import { Building2, UserCircle, PlusCircle, FileSpreadsheet, ShieldCheck, Receipt } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { UserProfile } from '../types';
+import { COMPANIES } from '../data/mockData';
+import { auth, googleProvider } from '../firebase';
+import { signOut, User as FirebaseUser } from 'firebase/auth';
+import { 
+  Building2, UserCircle, PlusCircle, FileSpreadsheet, 
+  ShieldCheck, Receipt, LogOut, Shield, Users 
+} from 'lucide-react';
 
 interface NavbarProps {
   currentUser: UserProfile;
-  setCurrentUser: (user: UserProfile) => void;
-  selectedEntityFilter: string;
-  setSelectedEntityFilter: (entityId: string) => void;
+  firebaseUser: FirebaseUser;
   onOpenSubmitModal: () => void;
   onOpenExportModal: () => void;
+  onOpenUserManagementModal: () => void;
   activeTab: 'dashboard' | 'directory';
   setActiveTab: (tab: 'dashboard' | 'directory') => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
   currentUser,
-  setCurrentUser,
-  selectedEntityFilter,
-  setSelectedEntityFilter,
+  firebaseUser,
   onOpenSubmitModal,
   onOpenExportModal,
+  onOpenUserManagementModal,
   activeTab,
   setActiveTab
 }) => {
-  const currentEntity = COMPANIES.find(c => c.id === currentUser.defaultCompanyId) || COMPANIES[0];
+  const primaryEntity = COMPANIES.find(c => c.id === currentUser.defaultCompanyId) || COMPANIES[0];
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.error('Sign Out Error:', err);
+    }
+  };
 
   return (
     <header className="bg-slate-900 text-white shadow-md border-b border-slate-800 sticky top-0 z-40">
@@ -37,7 +48,9 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Receipt className="w-6 h-6" />
             </div>
             <div>
-              <span className="font-bold text-lg tracking-wide block leading-none">Staff Claim & Voucher System</span>
+              <div className="flex items-center space-x-2">
+                <span className="font-bold text-lg tracking-wide block leading-none">Staff Claim & Voucher System</span>
+              </div>
               <span className="text-xs text-emerald-400 font-medium">Multi-Entity Malaysian Accounting Portal (RM)</span>
             </div>
           </div>
@@ -62,7 +75,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           </div>
 
-          {/* Action Buttons & Switchers */}
+          {/* Action Buttons & User Profile */}
           <div className="flex items-center space-x-3">
             
             {/* Submit Claim Button */}
@@ -74,59 +87,53 @@ export const Navbar: React.FC<NavbarProps> = ({
               <span>New Claim</span>
             </button>
 
-            {/* Export CSV Button */}
-            <button
-              onClick={onOpenExportModal}
-              className="inline-flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition-all"
-              title="Export CSV for SQL Accounting / AutoCount"
-            >
-              <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
-              <span className="hidden sm:inline">Accounting CSV</span>
-            </button>
+            {/* Export CSV Button (Only for accounts and admin) */}
+            {currentUser.role !== 'staff' && (
+              <button
+                onClick={onOpenExportModal}
+                className="hidden sm:inline-flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-lg text-sm font-medium transition-all"
+                title="Export CSV for SQL Accounting / AutoCount"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+                <span>Accounting CSV</span>
+              </button>
+            )}
 
-            {/* User Switcher Dropdown */}
-            <div className="relative group">
-              <div className="flex items-center space-x-2 bg-slate-800/80 border border-slate-700 px-3 py-1.5 rounded-lg cursor-pointer hover:bg-slate-800 transition">
-                <UserCircle className="w-5 h-5 text-emerald-400" />
-                <div className="text-left hidden lg:block">
-                  <div className="text-xs font-semibold leading-none">{currentUser.name}</div>
-                  <div className="text-[10px] text-slate-400 uppercase tracking-wider">{currentUser.role}</div>
+            {/* Admin User Management Button */}
+            {currentUser.role === 'admin' && (
+              <button
+                onClick={onOpenUserManagementModal}
+                className="hidden sm:inline-flex items-center space-x-1.5 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-600/40 px-3 py-2 rounded-lg text-xs font-semibold transition"
+                title="Manage Team & Access Control"
+              >
+                <Users className="w-4 h-4" />
+                <span>Team Settings</span>
+              </button>
+            )}
+
+            {/* User Profile Badge & Sign Out */}
+            <div className="flex items-center space-x-3 bg-slate-800 border border-slate-700 px-3 py-1.5 rounded-xl">
+              <div className="text-left">
+                <div className="text-xs font-semibold leading-tight flex items-center space-x-1.5">
+                  <span>{currentUser.name}</span>
+                  <span className={`px-1.5 py-0.2 rounded text-[9px] uppercase font-bold ${
+                    currentUser.role === 'admin' ? 'bg-amber-100 text-amber-800' :
+                    currentUser.role === 'accounts' ? 'bg-blue-100 text-blue-800' : 'bg-slate-200 text-slate-800'
+                  }`}>
+                    {currentUser.role}
+                  </span>
+                </div>
+                <div className="text-[10px] text-emerald-400 truncate max-w-[140px]">
+                  {primaryEntity.name}
                 </div>
               </div>
-              <div className="absolute right-0 mt-2 w-72 bg-white text-slate-900 rounded-xl shadow-2xl py-2 hidden group-hover:block z-50 border border-slate-200">
-                <div className="px-4 py-2 border-b border-slate-100">
-                  <p className="text-xs text-slate-500 uppercase tracking-wide font-bold">Switch Demo User & Role</p>
-                  <p className="text-xs text-slate-600">Simulate staff vs. managing partner approval</p>
-                </div>
-                <div className="max-h-64 overflow-y-auto">
-                  {USERS.map(u => {
-                    const comp = COMPANIES.find(c => c.id === u.defaultCompanyId);
-                    const isSelected = u.id === currentUser.id;
-                    return (
-                      <button
-                        key={u.id}
-                        onClick={() => setCurrentUser(u)}
-                        className={`w-full text-left px-4 py-2.5 text-xs hover:bg-emerald-50 transition flex items-center justify-between border-b border-slate-50 last:border-0 ${
-                          isSelected ? 'bg-emerald-50/80 font-semibold text-emerald-900' : ''
-                        }`}
-                      >
-                        <div>
-                          <div className="font-medium text-slate-900 flex items-center space-x-1">
-                            <span>{u.name}</span>
-                            {u.role === 'admin' && <ShieldCheck className="w-3.5 h-3.5 text-amber-600 inline" />}
-                          </div>
-                          <div className="text-[10px] text-slate-500">{comp?.name.substring(0, 30)}...</div>
-                        </div>
-                        <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold ${
-                          u.role === 'admin' ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-700'
-                        }`}>
-                          {u.role}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+              <button
+                onClick={handleLogout}
+                className="text-slate-400 hover:text-white p-1 transition"
+                title="Sign Out"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
             </div>
 
           </div>

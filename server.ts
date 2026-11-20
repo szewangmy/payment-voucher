@@ -10,6 +10,66 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+async function callGeminiWithRetry(ai: GoogleGenAI, base64Data: string, detectedMime: string, receiptSchema: Schema) {
+  const models = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.1-pro'];
+  const maxRetriesPerModel = 3;
+
+  for (const model of models) {
+    for (let attempt = 1; attempt <= maxRetriesPerModel; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: [
+            {
+              inlineData: {
+                data: base64Data,
+                mimeType: detectedMime
+              }
+            },
+            {
+              text: "Analyze this Malaysian receipt, invoice, or payment bill. Extract the merchant name, receipt date (YYYY-MM-DD), receipt/invoice number, a concise particulars description, total gross amount in RM, tax amount in RM, and suggest the appropriate Malaysian accounting GL account category."
+            }
+          ],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: receiptSchema,
+            temperature: 0.1,
+            thinkingConfig: { thinkingBudget: 0 } as any
+          }
+        });
+
+        if (response.text) {
+          return response.text;
+        }
+      } catch (err: any) {
+        const errStr = String(err?.message || err);
+        const isRateLimitOrUnavailable = 
+          errStr.includes('503') || 
+          errStr.includes('429') || 
+          errStr.includes('UNAVAILABLE') || 
+          errStr.includes('Resource exhausted') ||
+          errStr.includes('overloaded');
+        
+        console.warn(`OCR attempt ${attempt} for model ${model} failed: ${errStr}`);
+
+        if (isRateLimitOrUnavailable && attempt < maxRetriesPerModel) {
+          // Exponential backoff: 1.5s, 3s, 6s + random jitter
+          const delay = Math.pow(2, attempt - 1) * 1500 + Math.random() * 500;
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        } else if (attempt === maxRetriesPerModel) {
+          // Exhausted retries for this model, move to next model fallback
+          break;
+        } else if (!isRateLimitOrUnavailable) {
+          // Non-retryable client/auth error
+          throw err;
+        }
+      }
+    }
+  }
+  throw new Error('Gemini OCR is temporarily busy due to high traffic. You can click Retry Scan or enter the item manually below.');
+}
+
 async function startServer() {
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -60,36 +120,15 @@ async function startServer() {
         required: ["merchant_name", "receipt_date", "receipt_or_invoice_no", "description_summary", "total_amount_rm", "suggested_account_category"]
       };
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: [
-          {
-            inlineData: {
-              data: base64Data,
-              mimeType: detectedMime
-            }
-          },
-          {
-            text: "Analyze this Malaysian receipt, invoice, or payment bill. Extract the merchant name, receipt date (YYYY-MM-DD), receipt/invoice number, a concise particulars description, total gross amount in RM, tax amount in RM, and suggest the appropriate Malaysian accounting GL account category."
-          }
-        ],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: receiptSchema,
-          temperature: 0.1
-        }
-      });
-
-      const textResult = response.text;
-      if (!textResult) {
-        throw new Error('No response generated from Gemini OCR');
-      }
-
+      const textResult = await callGeminiWithRetry(ai, base64Data, detectedMime, receiptSchema);
       const parsedData = JSON.parse(textResult);
       return res.json({ success: true, data: parsedData });
     } catch (err: any) {
       console.error('OCR Error:', err);
-      return res.status(500).json({ success: false, error: err.message || 'OCR extraction failed' });
+      return res.status(500).json({ 
+        success: false, 
+        error: err.message || 'Gemini OCR is temporarily busy due to high traffic. You can click Retry Scan or enter the item manually below.' 
+      });
     }
   });
 

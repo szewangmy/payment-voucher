@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, ClaimVoucher } from './types';
-import { USERS, INITIAL_CLAIMS } from './data/mockData';
+import { COMPANIES, USERS, INITIAL_CLAIMS } from './data/mockData';
+import { auth, db } from './firebase';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { collection, getDocs, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, query, where } from 'firebase/firestore';
+
 import { Navbar } from './components/Navbar';
 import { Dashboard } from './components/Dashboard';
 import { EntitiesDirectory } from './components/EntitiesDirectory';
@@ -8,51 +12,159 @@ import { ClaimSubmitModal } from './components/ClaimSubmitModal';
 import { VoucherDetailModal } from './components/VoucherDetailModal';
 import { PaymentVoucherPrintView } from './components/PaymentVoucherPrintView';
 import { AccountingExportModal } from './components/AccountingExportModal';
+import { LoginScreen } from './components/LoginScreen';
+import { UserManagementModal } from './components/UserManagementModal';
+import { Loader2 } from 'lucide-react';
 
 export default function App() {
-  // Persistent User state
-  const [currentUser, setCurrentUser] = useState<UserProfile>(() => {
-    const saved = localStorage.getItem('staff_claim_current_user');
-    return saved ? JSON.parse(saved) : USERS[0];
-  });
-
-  // Persistent Claims state
-  const [claims, setClaims] = useState<ClaimVoucher[]>(() => {
-    const saved = localStorage.getItem('staff_claim_vouchers_list');
-    return saved ? JSON.parse(saved) : INITIAL_CLAIMS;
-  });
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [claims, setClaims] = useState<ClaimVoucher[]>([]);
+  const [isLoadingAuth, setIsLoadingAuth] = useState<boolean>(true);
 
   const [selectedEntityFilter, setSelectedEntityFilter] = useState<string>('all');
   const [activeTab, setActiveTab] = useState<'dashboard' | 'directory'>('dashboard');
 
-  // Modals state
+  // Modals
   const [isSubmitModalOpen, setIsSubmitModalOpen] = useState<boolean>(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
+  const [isUserManagementOpen, setIsUserManagementOpen] = useState<boolean>(false);
   const [selectedClaim, setSelectedClaim] = useState<ClaimVoucher | null>(null);
   const [printClaim, setPrintClaim] = useState<ClaimVoucher | null>(null);
 
+  // Handle Firebase Auth & User Profile sync
   useEffect(() => {
-    localStorage.setItem('staff_claim_current_user', JSON.stringify(currentUser));
-  }, [currentUser]);
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      setFirebaseUser(fbUser);
+      if (fbUser) {
+        try {
+          const userDocRef = doc(db, 'users', fbUser.uid);
+          const userSnap = await getDoc(userDocRef);
 
-  useEffect(() => {
-    localStorage.setItem('staff_claim_vouchers_list', JSON.stringify(claims));
-  }, [claims]);
+          // Check if any users exist in Firestore to determine if this is the first user
+          const usersQuery = await getDocs(collection(db, 'users'));
+          const isFirstUser = usersQuery.empty;
 
-  const handleAddClaim = (newClaim: ClaimVoucher) => {
-    setClaims(prev => [newClaim, ...prev]);
-  };
+          if (userSnap.exists()) {
+            setCurrentUser({ id: userSnap.id, ...userSnap.data() } as UserProfile);
+          } else {
+            // Create user profile document in Firestore
+            const newProfile: UserProfile = {
+              id: fbUser.uid,
+              uid: fbUser.uid,
+              name: fbUser.displayName || fbUser.email?.split('@')[0] || 'Staff User',
+              email: fbUser.email || '',
+              role: isFirstUser ? 'admin' : 'staff',
+              assignedEntities: isFirstUser ? COMPANIES.map(c => c.id) : ['ing-wang'],
+              defaultCompanyId: 'ing-wang'
+            };
+            await setDoc(userDocRef, newProfile);
+            setCurrentUser(newProfile);
+          }
 
-  const handleUpdateClaim = (updated: ClaimVoucher) => {
-    setClaims(prev => prev.map(c => c.id === updated.id ? updated : c));
-  };
+          // Fetch claims from Firestore
+          await fetchClaims(fbUser.uid, isFirstUser ? 'admin' : (userSnap.exists() ? userSnap.data().role : 'staff'), isFirstUser ? COMPANIES.map(c => c.id) : (userSnap.exists() ? userSnap.data().assignedEntities : ['ing-wang']));
+        } catch (err) {
+          console.error('Error loading user profile or claims:', err);
+        }
+      } else {
+        setCurrentUser(null);
+        setClaims([]);
+      }
+      setIsLoadingAuth(false);
+    });
 
-  const handleDeleteClaim = (claimId: string) => {
-    if (window.confirm('Are you sure you want to delete this claim voucher?')) {
-      setClaims(prev => prev.filter(c => c.id !== claimId));
-      if (selectedClaim?.id === claimId) setSelectedClaim(null);
+    return () => unsubscribe();
+  }, []);
+
+  const fetchClaims = async (uid: string, role: string, assignedEntities: string[]) => {
+    try {
+      const claimsSnap = await getDocs(collection(db, 'claims'));
+      const list: ClaimVoucher[] = [];
+      claimsSnap.forEach((docSnap) => {
+        const claim = { id: docSnap.id, ...docSnap.data() } as ClaimVoucher;
+        
+        // Privacy & role-based filtering
+        if (role === 'staff') {
+          if (claim.createdByUid === uid || claim.claimantId === uid) {
+            list.push(claim);
+          }
+        } else {
+          // accounts or admin can view claims in assigned entities
+          if (assignedEntities.includes(claim.companyId) || assignedEntities.includes(claim.companyEntityId)) {
+            list.push(claim);
+          }
+        }
+      });
+
+      // If no claims exist in Firestore yet, seed initial mock claims for immediate testing
+      if (list.length === 0 && claimsSnap.empty) {
+        for (const initial of INITIAL_CLAIMS) {
+          const seededClaim = {
+            ...initial,
+            createdByUid: uid,
+            companyEntityId: initial.companyId
+          };
+          await setDoc(doc(collection(db, 'claims')), seededClaim);
+          list.push(seededClaim);
+        }
+      }
+
+      setClaims(list);
+    } catch (err) {
+      console.error('Error fetching claims:', err);
     }
   };
+
+  const handleAddClaim = async (newClaim: ClaimVoucher) => {
+    if (!currentUser) return;
+    try {
+      const claimWithMeta = {
+        ...newClaim,
+        createdByUid: currentUser.uid,
+        companyEntityId: newClaim.companyId
+      };
+      const docRef = await addDoc(collection(db, 'claims'), claimWithMeta);
+      const savedClaim = { ...claimWithMeta, id: docRef.id };
+      setClaims(prev => [savedClaim, ...prev]);
+    } catch (err) {
+      console.error('Error adding claim:', err);
+    }
+  };
+
+  const handleUpdateClaim = async (updated: ClaimVoucher) => {
+    try {
+      await updateDoc(doc(db, 'claims', updated.id), { ...updated });
+      setClaims(prev => prev.map(c => c.id === updated.id ? updated : c));
+    } catch (err) {
+      console.error('Error updating claim:', err);
+    }
+  };
+
+  const handleDeleteClaim = async (claimId: string) => {
+    if (window.confirm('Are you sure you want to delete this claim voucher?')) {
+      try {
+        await deleteDoc(doc(db, 'claims', claimId));
+        setClaims(prev => prev.filter(c => c.id !== claimId));
+        if (selectedClaim?.id === claimId) setSelectedClaim(null);
+      } catch (err) {
+        console.error('Error deleting claim:', err);
+      }
+    }
+  };
+
+  if (isLoadingAuth) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center space-y-4">
+        <Loader2 className="w-8 h-8 text-emerald-500 animate-spin" />
+        <p className="text-sm font-medium text-slate-300">Loading Staff Claim & Voucher Portal...</p>
+      </div>
+    );
+  }
+
+  if (!firebaseUser || !currentUser) {
+    return <LoginScreen />;
+  }
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 font-sans antialiased flex flex-col justify-between">
@@ -60,11 +172,10 @@ export default function App() {
       {/* Top Navbar */}
       <Navbar
         currentUser={currentUser}
-        setCurrentUser={setCurrentUser}
-        selectedEntityFilter={selectedEntityFilter}
-        setSelectedEntityFilter={setSelectedEntityFilter}
+        firebaseUser={firebaseUser}
         onOpenSubmitModal={() => setIsSubmitModalOpen(true)}
         onOpenExportModal={() => setIsExportModalOpen(true)}
+        onOpenUserManagementModal={() => setIsUserManagementOpen(true)}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
       />
@@ -89,7 +200,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-500">
-        <p>Staff Claim & Payment Voucher System (RM) • Multi-Entity Malaysian Accounting & Gemini AI OCR</p>
+        <p>Staff Claim & Payment Voucher System (RM) • Multi-Entity Malaysian Accounting & Firebase Security</p>
       </footer>
 
       {/* Modals */}
@@ -121,10 +232,17 @@ export default function App() {
         />
       )}
 
-      {isExportModalOpen && (
+      {isExportModalOpen && currentUser.role !== 'staff' && (
         <AccountingExportModal
           claims={claims}
           onClose={() => setIsExportModalOpen(false)}
+        />
+      )}
+
+      {isUserManagementOpen && currentUser.role === 'admin' && (
+        <UserManagementModal
+          currentUser={currentUser}
+          onClose={() => setIsUserManagementOpen(false)}
         />
       )}
 

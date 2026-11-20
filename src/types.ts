@@ -1,4 +1,4 @@
-export type UserRole = 'staff' | 'admin' | 'partner';
+export type UserRole = 'staff' | 'accounts' | 'admin';
 
 export interface CompanyEntity {
   id: string;
@@ -16,9 +16,11 @@ export interface CompanyEntity {
 
 export interface UserProfile {
   id: string;
+  uid: string;
   name: string;
   email: string;
   role: UserRole;
+  assignedEntities: string[]; // array of company IDs
   defaultCompanyId: string;
   avatar?: string;
 }
@@ -31,7 +33,7 @@ export interface ExpenseItem {
   particulars: string;
   accountCode: string;
   accountName: string;
-  taxCode: string; // 'NR' (Non-Reg), 'SV' (Standard 8%), 'ZRL' (Zero)
+  taxCode: string; // 'NR', 'SV', 'ZRL'
   taxAmountRM: number;
   netAmountRM: number;
   amountRM: number;
@@ -44,13 +46,15 @@ export type PaymentMethod = 'cash' | 'cheque';
 export interface ClaimVoucher {
   id: string;
   voucherNo: string;
-  companyId: string;
+  companyId: string; // companyEntityId
+  companyEntityId: string;
   claimantId: string;
+  createdByUid: string;
   payTo: string;
   voucherDate: string;
   status: ClaimStatus;
   paymentMethod: PaymentMethod;
-  bankAccountCode: string; // e.g. '310-000' or '320-001'
+  bankAccountCode: string;
   chequeNo?: string;
   totalAmountRM: number;
   approvedBy?: string;

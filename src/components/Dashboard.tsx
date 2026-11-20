@@ -84,13 +84,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </p>
         </div>
         <div className="flex items-center space-x-3">
-          <button
-            onClick={onOpenExportModal}
-            className="inline-flex items-center space-x-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 px-4 py-2 rounded-lg text-sm font-medium shadow-2xs transition"
-          >
-            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-            <span>Export Accounting CSV</span>
-          </button>
+          {currentUser.role !== 'staff' && (
+            <button
+              onClick={onOpenExportModal}
+              className="inline-flex items-center space-x-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 px-4 py-2 rounded-lg text-sm font-medium shadow-2xs transition"
+            >
+              <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+              <span>Export Accounting CSV</span>
+            </button>
+          )}
           <button
             onClick={onOpenSubmitModal}
             className="inline-flex items-center space-x-2 bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-sm transition"

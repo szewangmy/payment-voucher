@@ -67,37 +67,47 @@ export const COMPANIES: CompanyEntity[] = [
 export const USERS: UserProfile[] = [
   {
     id: 'user_01',
+    uid: 'user_01',
     name: 'Tan Wei Ming',
     email: 'weiming@wangaccounting.com.my',
     role: 'staff',
+    assignedEntities: ['ing-wang'],
     defaultCompanyId: 'ing-wang'
   },
   {
     id: 'user_02',
+    uid: 'user_02',
     name: 'Sarah Lim',
     email: 'sarah.lim@mycorp.com.my',
     role: 'staff',
+    assignedEntities: ['my-corp'],
     defaultCompanyId: 'my-corp'
   },
   {
     id: 'user_03',
+    uid: 'user_03',
     name: 'Ahmad Razak',
     email: 'ahmad@tjw.com.my',
-    role: 'staff',
+    role: 'accounts',
+    assignedEntities: ['tjw-accounting', 'ing-wang'],
     defaultCompanyId: 'tjw-accounting'
   },
   {
     id: 'user_04',
+    uid: 'user_04',
     name: 'Mei Ling',
     email: 'meiling@wangservices.com.my',
     role: 'staff',
+    assignedEntities: ['wang-accounting'],
     defaultCompanyId: 'wang-accounting'
   },
   {
     id: 'user_05',
+    uid: 'user_05',
     name: 'Partner Wang Senior',
     email: 'partner.wang@wangaccounting.com.my',
     role: 'admin',
+    assignedEntities: COMPANIES.map(c => c.id),
     defaultCompanyId: 'ing-wang'
   }
 ];
@@ -119,7 +129,9 @@ export const INITIAL_CLAIMS: ClaimVoucher[] = [
     id: 'CLM-2026-001',
     voucherNo: 'IWC-PV-2026-008',
     companyId: 'ing-wang',
+    companyEntityId: 'ing-wang',
     claimantId: 'user_01',
+    createdByUid: 'user_01',
     payTo: 'Tan Wei Ming',
     voucherDate: '2026-11-18',
     status: 'approved',
@@ -164,7 +176,9 @@ export const INITIAL_CLAIMS: ClaimVoucher[] = [
     id: 'CLM-2026-002',
     voucherNo: 'MCS-PV-2026-003',
     companyId: 'my-corp',
+    companyEntityId: 'my-corp',
     claimantId: 'user_02',
+    createdByUid: 'user_02',
     payTo: 'Sarah Lim',
     voucherDate: '2026-11-19',
     status: 'pending',
@@ -193,7 +207,9 @@ export const INITIAL_CLAIMS: ClaimVoucher[] = [
     id: 'CLM-2026-003',
     voucherNo: 'TJW-PV-2026-012',
     companyId: 'tjw-accounting',
+    companyEntityId: 'tjw-accounting',
     claimantId: 'user_03',
+    createdByUid: 'user_03',
     payTo: 'Ahmad Razak',
     voucherDate: '2026-11-16',
     status: 'paid',
