@@ -3,7 +3,7 @@ import { UserProfile, ClaimVoucher, UserRole } from './types';
 import { COMPANIES, USERS, INITIAL_CLAIMS } from './data/mockData';
 import { auth, db } from './firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { collection, getDocs, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, query, where } from 'firebase/firestore';
+import { collection, getDocs, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, query, where, onSnapshot } from 'firebase/firestore';
 
 import { Navbar } from './components/Navbar';
 import { Dashboard } from './components/Dashboard';
@@ -47,8 +47,6 @@ export default function App() {
           if (userSnap.exists()) {
             const data = userSnap.data() as UserProfile;
             setCurrentUser({ ...data, id: userSnap.id });
-            assignedRole = data.role;
-            assignedEnts = data.assignedEntities || ['ing-wang'];
           } else {
             try {
               const bootstrapRef = doc(db, 'system_settings', 'admin_bootstrap');
@@ -78,11 +76,8 @@ export default function App() {
             await setDoc(userDocRef, newProfile);
             setCurrentUser(newProfile);
           }
-
-          // Fetch claims from Firestore
-          await fetchClaims(fbUser.uid, assignedRole, assignedEnts);
         } catch (err) {
-          console.error('Error loading user profile or claims:', err);
+          console.error('Error loading user profile:', err);
         }
       } else {
         setCurrentUser(null);
@@ -94,78 +89,67 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  const fetchClaims = async (uid: string, role: string, assignedEntities: string[]) => {
-    try {
-      const claimsSnap = await getDocs(collection(db, 'claims'));
+  // Real-time claims subscription via onSnapshot
+  useEffect(() => {
+    if (!currentUser) {
+      setClaims([]);
+      return;
+    }
+
+    const unsubClaims = onSnapshot(collection(db, 'claims'), (snapshot) => {
       const list: ClaimVoucher[] = [];
-      claimsSnap.forEach((docSnap) => {
+      snapshot.forEach((docSnap) => {
         const claim = { id: docSnap.id, ...docSnap.data() } as ClaimVoucher;
         
         // Privacy & role-based filtering
-        if (role === 'staff') {
-          if (claim.createdByUid === uid || claim.claimantId === uid) {
+        if (currentUser.role === 'admin') {
+          list.push(claim);
+        } else if (currentUser.role === 'staff') {
+          if (claim.createdByUid === currentUser.uid || claim.claimantId === currentUser.uid) {
             list.push(claim);
           }
         } else {
-          // accounts or admin can view claims in assigned entities
-          if (assignedEntities.includes(claim.companyId) || assignedEntities.includes(claim.companyEntityId)) {
+          // manager / accounts
+          const assigned = currentUser.assignedEntities || [];
+          if (assigned.includes(claim.companyId) || assigned.includes(claim.companyEntityId)) {
             list.push(claim);
           }
         }
       });
 
-      // If no claims exist in Firestore yet, seed initial mock claims for immediate testing
-      if (list.length === 0 && claimsSnap.empty) {
-        for (const initial of INITIAL_CLAIMS) {
-          const seededClaim = {
-            ...initial,
-            createdByUid: uid,
-            companyEntityId: initial.companyId
-          };
-          await setDoc(doc(collection(db, 'claims')), seededClaim);
-          list.push(seededClaim);
-        }
-      }
-
+      // Sort in JS by createdAt descending (no composite index required)
+      list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
       setClaims(list);
-    } catch (err) {
-      console.error('Error fetching claims:', err);
-    }
-  };
+    }, (err) => {
+      console.error('Claims snapshot error:', err);
+    });
 
-  const handleAddClaim = async (newClaim: ClaimVoucher) => {
-    if (!currentUser) return;
-    try {
-      const claimWithMeta = {
-        ...newClaim,
-        createdByUid: currentUser.uid,
-        companyEntityId: newClaim.companyId
-      };
-      const docRef = await addDoc(collection(db, 'claims'), claimWithMeta);
-      const savedClaim = { ...claimWithMeta, id: docRef.id };
-      setClaims(prev => [savedClaim, ...prev]);
-    } catch (err) {
-      console.error('Error adding claim:', err);
-    }
+    return () => unsubClaims();
+  }, [currentUser]);
+
+  const handleAddClaim = (newClaim: ClaimVoucher) => {
+    // Real-time claims synced via onSnapshot
   };
 
   const handleUpdateClaim = async (updated: ClaimVoucher) => {
     try {
       await updateDoc(doc(db, 'claims', updated.id), { ...updated });
       setClaims(prev => prev.map(c => c.id === updated.id ? updated : c));
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error updating claim:', err);
+      alert(`Failed to update claim in Firestore: ${err.message || err}`);
     }
   };
 
   const handleDeleteClaim = async (claimId: string) => {
-    if (window.confirm('Are you sure you want to delete this claim voucher?')) {
+    if (window.confirm('Are you sure you want to delete this claim voucher from Firestore?')) {
       try {
         await deleteDoc(doc(db, 'claims', claimId));
         setClaims(prev => prev.filter(c => c.id !== claimId));
         if (selectedClaim?.id === claimId) setSelectedClaim(null);
-      } catch (err) {
+      } catch (err: any) {
         console.error('Error deleting claim:', err);
+        alert(`Failed to delete claim from Firestore: ${err.message || err}`);
       }
     }
   };

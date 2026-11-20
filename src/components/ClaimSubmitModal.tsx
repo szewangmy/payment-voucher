@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { UserProfile, ClaimVoucher, ExpenseItem } from '../types';
 import { COMPANIES, GL_ACCOUNTS } from '../data/mockData';
 import { db } from '../firebase';
-import { doc, getDoc, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot, collection, addDoc } from 'firebase/firestore';
 import { GoogleGenAI, Schema, Type } from '@google/genai';
 import * as pdfjsLib from 'pdfjs-dist';
 import { Upload, Sparkles, X, Plus, Trash2, Check, AlertCircle, Loader2, RotateCw, CheckCircle2, Zap } from 'lucide-react';
@@ -47,6 +47,8 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
   const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([]);
   const [isAnyScanning, setIsAnyScanning] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   // Gemini Connection Status State
   const [geminiStatus, setGeminiStatus] = useState<{ connected: boolean; model: string; keySource?: string } | null>(null);
@@ -493,7 +495,20 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
 
   const totalAmount = items.reduce((sum, item) => sum + (parseFloat(String(item.amountRM)) || 0), 0);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const sanitizeForFirestore = (obj: any): any => {
+    if (obj === undefined) return null;
+    if (obj === null || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) return obj.map(sanitizeForFirestore);
+    const cleaned: Record<string, any> = {};
+    for (const key of Object.keys(obj)) {
+      if (obj[key] !== undefined) {
+        cleaned[key] = sanitizeForFirestore(obj[key]);
+      }
+    }
+    return cleaned;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (items.length === 0) {
       setErrorMsg('Please add at least one receipt item.');
@@ -505,30 +520,45 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
       return;
     }
 
-    const company = COMPANIES.find(c => c.id === selectedCompanyId) || COMPANIES[0];
-    const randomNum = Math.floor(1000 + Math.random() * 9000);
-    const voucherNo = `${company.voucherPrefix}2026-${randomNum}`;
+    setIsSubmitting(true);
+    setErrorMsg(null);
+    setSuccessMsg(null);
 
-    const newClaim: ClaimVoucher = {
-      id: `CLM-2026-${Date.now().toString().slice(-4)}`,
-      voucherNo,
-      companyId: selectedCompanyId,
-      companyEntityId: selectedCompanyId,
-      claimantId: currentUser.id,
-      createdByUid: currentUser.uid,
-      payTo,
-      voucherDate,
-      status: 'pending',
-      paymentMethod,
-      bankAccountCode,
-      chequeNo: paymentMethod === 'cheque' ? chequeNo : undefined,
-      totalAmountRM: totalAmount,
-      createdAt: new Date().toISOString().split('T')[0],
-      items
-    };
+    try {
+      const company = COMPANIES.find(c => c.id === selectedCompanyId) || COMPANIES[0];
+      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      const voucherNo = `${company.voucherPrefix}2026-${randomNum}`;
 
-    onAddClaim(newClaim);
-    onClose();
+      const newClaim: ClaimVoucher = {
+        id: `CLM-2026-${Date.now().toString().slice(-4)}`,
+        voucherNo,
+        companyId: selectedCompanyId,
+        companyEntityId: selectedCompanyId,
+        claimantId: currentUser.id,
+        createdByUid: currentUser.uid,
+        payTo,
+        voucherDate,
+        status: 'pending',
+        paymentMethod,
+        bankAccountCode,
+        chequeNo: paymentMethod === 'cheque' ? chequeNo : undefined,
+        totalAmountRM: totalAmount,
+        createdAt: new Date().toISOString().split('T')[0],
+        items
+      };
+
+      const sanitized = sanitizeForFirestore(newClaim);
+      await addDoc(collection(db, 'claims'), sanitized);
+      setSuccessMsg('Claim submitted successfully to Firestore!');
+      onAddClaim(newClaim);
+      setTimeout(() => {
+        onClose();
+      }, 1200);
+    } catch (err: any) {
+      console.error('Error adding claim to Firestore:', err);
+      setErrorMsg(`Failed to save claim to Firestore: ${err.message || err}`);
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -594,6 +624,13 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
               <p className="text-[11px] font-semibold text-rose-900">
                 Strict Real-Date Enforcement is ACTIVE. Submission is blocked until date/audit violations are resolved.
               </p>
+            </div>
+          )}
+
+          {successMsg && (
+            <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-xl text-sm flex items-center space-x-2">
+              <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-600" />
+              <span className="font-semibold">{successMsg}</span>
             </div>
           )}
 
@@ -909,10 +946,10 @@ export const ClaimSubmitModal: React.FC<ClaimSubmitModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={items.length === 0 || (strictRealDateOnly && hasDangerZoneViolation)}
+              disabled={isSubmitting || items.length === 0 || (strictRealDateOnly && hasDangerZoneViolation)}
               className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium shadow-sm disabled:opacity-50"
             >
-              Submit Claim for Approval
+              {isSubmitting ? 'Submitting to Firestore...' : 'Submit Claim for Approval'}
             </button>
           </div>
 

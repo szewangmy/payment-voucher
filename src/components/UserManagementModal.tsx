@@ -187,9 +187,17 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
   const updateUserRole = async (uid: string, newRole: 'staff' | 'manager' | 'accounts' | 'admin') => {
     setErrorMsg(null);
     try {
-      await updateDoc(doc(db, 'users', uid), { role: newRole });
-      setUsersList(prev => prev.map(u => u.uid === uid ? { ...u, role: newRole } : u));
-      setToastMsg('Permissions updated');
+      const updatePayload: any = { role: newRole };
+      if (newRole === 'admin') {
+        updatePayload.assignedEntities = COMPANIES.map(c => c.id);
+      }
+      await updateDoc(doc(db, 'users', uid), updatePayload);
+      setUsersList(prev => prev.map(u => u.uid === uid ? { 
+        ...u, 
+        role: newRole, 
+        assignedEntities: newRole === 'admin' ? COMPANIES.map(c => c.id) : u.assignedEntities 
+      } : u));
+      setToastMsg(newRole === 'admin' ? 'Role updated to Admin with all 5 company entities assigned' : 'Permissions updated');
       setTimeout(() => setToastMsg(null), 3000);
     } catch (err: any) {
       console.error('Error updating user role:', err);
