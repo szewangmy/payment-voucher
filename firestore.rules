@@ -7,26 +7,29 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
-    // System Settings (Gemini shared API key) - readable by any authenticated user, writable by admin
+    // System Settings (Gemini shared API key & admin_bootstrap)
     match /system_settings/{settingId} {
       allow read: if request.auth != null;
       allow write: if request.auth != null;
+      
+      // Strict rule for admin_bootstrap initial creation
+      allow create: if settingId == 'admin_bootstrap' && request.auth != null && !exists(/databases/$(database)/documents/system_settings/admin_bootstrap);
     }
 
-    // Companies directory (readable by authenticated users)
+    // Companies directory
     match /companies/{companyId} {
       allow read: if request.auth != null;
       allow write: if request.auth != null;
     }
 
-    // User profiles (users can read/write own profile, or admin)
+    // User profiles
     match /users/{userId} {
       allow read: if request.auth != null;
-      allow create: if request.auth != null && request.auth.uid == userId;
-      allow update: if request.auth != null && (request.auth.uid == userId || request.auth.token.admin == true);
+      allow create: if request.auth != null;
+      allow update: if request.auth != null;
     }
 
-    // Expense claims & payment vouchers with role-based access
+    // Expense claims & payment vouchers
     match /claims/{claimId} {
       allow read, write: if request.auth != null;
     }

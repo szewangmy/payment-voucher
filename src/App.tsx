@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { UserProfile, ClaimVoucher } from './types';
+import { UserProfile, ClaimVoucher, UserRole } from './types';
 import { COMPANIES, USERS, INITIAL_CLAIMS } from './data/mockData';
 import { auth, db } from './firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
@@ -41,21 +41,38 @@ export default function App() {
           const userDocRef = doc(db, 'users', fbUser.uid);
           const userSnap = await getDoc(userDocRef);
 
-          // Check if any users exist in Firestore to determine if this is the first user
-          const usersQuery = await getDocs(collection(db, 'users'));
-          const isFirstUser = usersQuery.empty;
+          let assignedRole: UserRole = 'staff';
+          let assignedEnts = ['ing-wang'];
 
           if (userSnap.exists()) {
-            setCurrentUser({ id: userSnap.id, ...userSnap.data() } as UserProfile);
+            const data = userSnap.data() as UserProfile;
+            setCurrentUser({ ...data, id: userSnap.id });
+            assignedRole = data.role;
+            assignedEnts = data.assignedEntities || ['ing-wang'];
           } else {
-            // Create user profile document in Firestore
+            try {
+              const bootstrapRef = doc(db, 'system_settings', 'admin_bootstrap');
+              const bootstrapSnap = await getDoc(bootstrapRef);
+              if (!bootstrapSnap.exists()) {
+                await setDoc(bootstrapRef, {
+                  ownerUid: fbUser.uid,
+                  ownerEmail: fbUser.email || '',
+                  claimedAt: new Date().toISOString()
+                });
+                assignedRole = 'admin';
+                assignedEnts = COMPANIES.map(c => c.id);
+              }
+            } catch (bootErr) {
+              console.warn('Bootstrap claim note:', bootErr);
+            }
+
             const newProfile: UserProfile = {
               id: fbUser.uid,
               uid: fbUser.uid,
               name: fbUser.displayName || fbUser.email?.split('@')[0] || 'Staff User',
               email: fbUser.email || '',
-              role: isFirstUser ? 'admin' : 'staff',
-              assignedEntities: isFirstUser ? COMPANIES.map(c => c.id) : ['ing-wang'],
+              role: assignedRole,
+              assignedEntities: assignedEnts,
               defaultCompanyId: 'ing-wang'
             };
             await setDoc(userDocRef, newProfile);
@@ -63,7 +80,7 @@ export default function App() {
           }
 
           // Fetch claims from Firestore
-          await fetchClaims(fbUser.uid, isFirstUser ? 'admin' : (userSnap.exists() ? userSnap.data().role : 'staff'), isFirstUser ? COMPANIES.map(c => c.id) : (userSnap.exists() ? userSnap.data().assignedEntities : ['ing-wang']));
+          await fetchClaims(fbUser.uid, assignedRole, assignedEnts);
         } catch (err) {
           console.error('Error loading user profile or claims:', err);
         }

@@ -3,7 +3,7 @@ import { UserProfile } from '../types';
 import { COMPANIES } from '../data/mockData';
 import { db } from '../firebase';
 import { collection, getDocs, doc, updateDoc, setDoc, getDoc } from 'firebase/firestore';
-import { Shield, Users, Check, X, Building2, UserCheck, Key, Save, Sparkles } from 'lucide-react';
+import { Shield, Users, Check, X, Building2, UserCheck, Key, Save, Sparkles, AlertCircle } from 'lucide-react';
 
 interface UserManagementModalProps {
   currentUser: UserProfile;
@@ -19,6 +19,8 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
   const [sharedApiKey, setSharedApiKey] = useState<string>('');
   const [isSavingKey, setIsSavingKey] = useState<boolean>(false);
   const [keySavedSuccess, setKeySavedSuccess] = useState<boolean>(false);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
     fetchUsers();
@@ -34,8 +36,9 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
         list.push({ id: docSnap.id, ...docSnap.data() } as UserProfile);
       });
       setUsersList(list);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error fetching users:', err);
+      setErrorMsg(err.message || 'Failed to fetch team users.');
     } finally {
       setIsLoading(false);
     }
@@ -59,6 +62,7 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     e.preventDefault();
     setIsSavingKey(true);
     setKeySavedSuccess(false);
+    setErrorMsg(null);
     try {
       await setDoc(doc(db, 'system_settings', 'gemini_config'), {
         apiKey: sharedApiKey.trim(),
@@ -66,25 +70,34 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
         updatedAt: new Date().toISOString()
       }, { merge: true });
       setKeySavedSuccess(true);
-      setTimeout(() => setKeySavedSuccess(false), 3000);
-    } catch (err) {
+      setToastMsg('Shared Gemini API key saved successfully.');
+      setTimeout(() => {
+        setKeySavedSuccess(false);
+        setToastMsg(null);
+      }, 3000);
+    } catch (err: any) {
       console.error('Error saving shared API key:', err);
-      alert('Failed to save shared API key.');
+      setErrorMsg(err.message || 'Failed to save shared API key.');
     } finally {
       setIsSavingKey(false);
     }
   };
 
   const updateUserRole = async (uid: string, newRole: 'staff' | 'manager' | 'accounts' | 'admin') => {
+    setErrorMsg(null);
     try {
       await updateDoc(doc(db, 'users', uid), { role: newRole });
       setUsersList(prev => prev.map(u => u.uid === uid ? { ...u, role: newRole } : u));
-    } catch (err) {
+      setToastMsg('Permissions updated');
+      setTimeout(() => setToastMsg(null), 3000);
+    } catch (err: any) {
       console.error('Error updating user role:', err);
+      setErrorMsg(err.message || 'Failed to update user role.');
     }
   };
 
   const toggleEntityAccess = async (uid: string, entityId: string, currentEntities: string[]) => {
+    setErrorMsg(null);
     let updatedEntities = [...(currentEntities || [])];
     if (updatedEntities.includes(entityId)) {
       updatedEntities = updatedEntities.filter(id => id !== entityId);
@@ -95,8 +108,11 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
     try {
       await updateDoc(doc(db, 'users', uid), { assignedEntities: updatedEntities });
       setUsersList(prev => prev.map(u => u.uid === uid ? { ...u, assignedEntities: updatedEntities } : u));
-    } catch (err) {
+      setToastMsg('Permissions updated');
+      setTimeout(() => setToastMsg(null), 3000);
+    } catch (err: any) {
       console.error('Error updating entity access:', err);
+      setErrorMsg(err.message || 'Failed to update entity access.');
     }
   };
 
@@ -122,6 +138,20 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
         {/* Body */}
         <div className="p-6 overflow-y-auto space-y-6 flex-1">
           
+          {toastMsg && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-xl text-xs flex items-center space-x-2">
+              <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span className="font-semibold">{toastMsg}</span>
+            </div>
+          )}
+
+          {errorMsg && (
+            <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl text-xs flex items-center space-x-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+              <span>{errorMsg}</span>
+            </div>
+          )}
+
           {/* Shared Company Gemini API Key Section */}
           <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 space-y-3">
             <div className="flex items-center space-x-2 text-emerald-900 font-bold text-sm">
@@ -163,57 +193,72 @@ export const UserManagementModal: React.FC<UserManagementModalProps> = ({
               <div className="text-center py-8 text-slate-500 text-xs">Loading team members...</div>
             ) : (
               <div className="space-y-4">
-                {usersList.map((user) => (
-                  <div key={user.uid} className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
-                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
-                      <div>
-                        <div className="font-bold text-slate-900 text-sm flex items-center space-x-2">
-                          <span>{user.name}</span>
-                          <span className="text-xs font-mono text-slate-500">({user.email})</span>
+                {usersList.map((user) => {
+                  const isSelfAdmin = user.uid === currentUser.uid;
+                  return (
+                    <div key={user.uid} className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
+                        <div>
+                          <div className="font-bold text-slate-900 text-sm flex items-center space-x-2">
+                            <span>{user.name}</span>
+                            <span className="text-xs font-mono text-slate-500">({user.email})</span>
+                            {isSelfAdmin && (
+                              <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded text-[10px] font-bold">You (Admin)</span>
+                            )}
+                          </div>
+                          <div className="text-xs text-slate-500 font-mono">UID: {user.uid}</div>
                         </div>
-                        <div className="text-xs text-slate-500 font-mono">UID: {user.uid}</div>
+
+                        {/* Role Selector with Self-Demotion Guard */}
+                        <div className="flex items-center space-x-2">
+                          <span className="text-xs font-semibold text-slate-600">Role:</span>
+                          <select
+                            value={user.role}
+                            disabled={isSelfAdmin}
+                            onChange={(e) => updateUserRole(user.uid, e.target.value as any)}
+                            className={`text-xs bg-white border border-slate-300 rounded-lg p-1.5 font-semibold ${
+                              isSelfAdmin ? 'opacity-60 cursor-not-allowed bg-slate-100' : ''
+                            }`}
+                          >
+                            <option value="staff">Staff (Claimant)</option>
+                            <option value="manager">Manager (Approver)</option>
+                            <option value="accounts">Accounts (Verifier)</option>
+                            <option value="admin">Admin (Partner)</option>
+                          </select>
+                        </div>
                       </div>
 
-                      {/* Role Selector */}
-                      <div className="flex items-center space-x-2">
-                        <span className="text-xs font-semibold text-slate-600">Role:</span>
-                        <select
-                          value={user.role}
-                          onChange={(e) => updateUserRole(user.uid, e.target.value as any)}
-                          className="text-xs bg-white border border-slate-300 rounded-lg p-1.5 font-semibold"
-                        >
-                          <option value="staff">Staff (Claimant)</option>
-                          <option value="manager">Manager (Approver)</option>
-                          <option value="accounts">Accounts (Verifier)</option>
-                          <option value="admin">Admin (Partner)</option>
-                        </select>
-                      </div>
-                    </div>
+                      {isSelfAdmin && (
+                        <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
+                          ⚠️ You cannot demote your own Admin role — promote another user to Admin first, then have them update your role if transferring ownership.
+                        </p>
+                      )}
 
-                    {/* Company Access Toggles */}
-                    <div className="pt-3 border-t border-slate-200">
-                      <span className="text-xs font-bold text-slate-700 block mb-2">Assigned Company Entities:</span>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                        {COMPANIES.map(company => {
-                          const isAssigned = (user.assignedEntities || []).includes(company.id);
-                          return (
-                            <button
-                              key={company.id}
-                              type="button"
-                              onClick={() => toggleEntityAccess(user.uid, company.id, user.assignedEntities)}
-                              className={`text-left px-3 py-2 rounded-lg text-xs border transition flex items-center justify-between ${
-                                isAssigned ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-medium' : 'bg-white border-slate-200 text-slate-600'
-                              }`}
-                            >
-                              <span className="truncate mr-2">{company.name}</span>
-                              {isAssigned && <Check className="w-4 h-4 text-emerald-600 shrink-0" />}
-                            </button>
-                          );
-                        })}
+                      {/* Company Access Toggles */}
+                      <div className="pt-3 border-t border-slate-200">
+                        <span className="text-xs font-bold text-slate-700 block mb-2">Assigned Company Entities:</span>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                          {COMPANIES.map(company => {
+                            const isAssigned = (user.assignedEntities || []).includes(company.id);
+                            return (
+                              <button
+                                key={company.id}
+                                type="button"
+                                onClick={() => toggleEntityAccess(user.uid, company.id, user.assignedEntities)}
+                                className={`text-left px-3 py-2 rounded-lg text-xs border transition flex items-center justify-between ${
+                                  isAssigned ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-medium' : 'bg-white border-slate-200 text-slate-600'
+                                }`}
+                              >
+                                <span className="truncate mr-2">{company.name}</span>
+                                {isAssigned && <Check className="w-4 h-4 text-emerald-600 shrink-0" />}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
